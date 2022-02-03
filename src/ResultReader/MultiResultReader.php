@@ -1,0 +1,220 @@
+<?php
+
+declare(strict_types=1);
+
+namespace PhpPg\PgConn\ResultReader;
+
+use Amp\ByteStream\ClosedException;
+use Amp\Cancellation;
+use Amp\CancelledException;
+use PhpPg\PgConn\Exception\PgErrorException;
+use PhpPg\PgConn\PgConn;
+use PhpPg\PgProto3\Messages\BackendMessageInterface;
+use PhpPg\PgProto3\Messages\CommandComplete;
+use PhpPg\PgProto3\Messages\ReadyForQuery;
+use PhpPg\PgProto3\Messages\RowDescription;
+
+/**
+ * Represent results of multiple SQL commands in Simple Protocol
+ */
+class MultiResultReader
+{
+    private bool $closed = false;
+    private ?ResultReaderInterface $reader = null;
+
+    public function __construct(
+        private PgConn $conn,
+        private \Closure $releaseConn,
+        private ?Cancellation $cancellation = null,
+    ) {
+    }
+
+    public function __destruct()
+    {
+        try {
+            $this->close();
+        } catch (\Throwable) {
+            // silently ignore errors
+        }
+    }
+
+    public function close(): void
+    {
+        if ($this->closed) {
+            return;
+        }
+
+        // read remaining messages
+        /* @phpstan-ignore-next-line */
+        while (!$this->closed) {
+            $this->receiveMessage();
+        }
+    }
+
+    public function isClosed(): bool
+    {
+        return $this->closed;
+    }
+
+    /**
+     *
+     * @return array<Result>
+     *
+     * @throws ClosedException
+     * @throws CancelledException
+     * @throws PgErrorException
+     */
+    public function readAll(): array
+    {
+        $results = [];
+
+        while ($this->nextResult()) {
+            $results[] = $this->getResult()->getResult();
+        }
+
+        return $results;
+    }
+
+    /**
+     * Advances the MultiResultReader to the next result.
+     * Each result represents one SQL command, if multiple commands are specified, multiple results will be available.
+     *
+     * @return bool true if a result is available
+     *
+     * @throws ClosedException
+     * @throws CancelledException
+     * @throws PgErrorException
+     */
+    public function nextResult(): bool
+    {
+        /**
+         * From: Postgres Protocol Flow (51.2.2. Simple Query)
+         *
+         * A frontend must be prepared to accept ErrorResponse and NoticeResponse messages
+         * whenever it is expecting any other type of message.
+         * See also Section 51.2.6 concerning messages that the backend might generate due to outside events.
+         *
+         * Recommended practice is to code frontends in a state-machine style
+         * that will accept any message type at any time that it could make sense,
+         * rather than wiring in assumptions about the exact sequence of messages.
+         */
+
+        // We will not say that there are no results until we get ReadyForQuery message
+        while (!$this->closed) {
+            $msg = $this->receiveMessage($this->cancellation);
+
+            switch ($msg::class) {
+                case RowDescription::class:
+                    $this->reader = new ResultReaderSimpleProtocol(
+                        mrr: $this,
+                        fieldDescriptions: $msg->fields,
+                        cancellation: $this->cancellation,
+                    );
+                    return true;
+
+                case CommandComplete::class:
+                    $this->reader = new ResultReaderSimpleProtocol(
+                        mrr: $this,
+                        commandTag: $msg->commandTag,
+                        cancellation: $this->cancellation,
+                    );
+                    return true;
+
+                case ReadyForQuery::class:
+                    return false;
+            }
+        }
+
+        return false;
+    }
+
+    public function getResult(): ResultReaderInterface
+    {
+        if ($this->reader === null) {
+            throw new \LogicException('Call nextResult first');
+        }
+
+        return $this->reader;
+    }
+
+    /**
+     * @return BackendMessageInterface
+     *
+     * @throws ClosedException
+     * @throws PgErrorException
+     * @throws CancelledException
+     * @internal Do not call in external code, this is low level method to accept Postgres Protocol message.
+     * Calling this method in external code may put Postgres connection into broken state.
+     *
+     */
+    public function receiveMessage(?Cancellation $cancellation = null): BackendMessageInterface
+    {
+        if ($this->closed) {
+            throw new \LogicException('MultiResultReader is closed');
+        }
+
+        try {
+            $message = $this->conn->receiveMessage($cancellation);
+        } catch (ClosedException $e) {
+            $this->free();
+
+            throw $e;
+        } catch (PgErrorException $e) {
+            /**
+             * In the event of an error, ErrorResponse is issued followed by ReadyForQuery.
+             * All further processing of the query string is aborted by ErrorResponse
+             * (even if more queries remained in it).
+             * Note that this might occur partway through the sequence of messages generated by an individual query.
+             */
+
+            if ($e->pgError->severity !== 'FATAL') {
+                // Finalize reading on Postgres error (put connection back to a valid state)
+                $this->restoreConnectionState();
+            }
+
+            $this->free();
+
+            throw $e;
+        }
+
+        /**
+         * From: Postgres Protocol Flow (53.2.3. Extended Query)
+         * The Describe message (portal variant) specifies the name of an existing portal
+         * (or an empty string for the unnamed portal).
+         * The response is a RowDescription message describing the rows that will be returned by executing the portal;
+         * or a NoData message if the portal does not contain a query that will return rows;
+         * or ErrorResponse if there is no such portal.
+         */
+
+        switch ($message::class) {
+            /**
+             * Processing of the query string is complete.
+             * A separate message is sent to indicate this because the query string might contain multiple SQL commands.
+             * (CommandComplete marks the end of processing one SQL command, not the whole string.)
+             * ReadyForQuery will always be sent, whether processing terminates successfully or with an error.
+             */
+            case ReadyForQuery::class:
+                $this->free();
+                break;
+        }
+
+        return $message;
+    }
+
+    private function restoreConnectionState(): void
+    {
+        try {
+            // TODO: Respect cancellation?
+            while ($this->receiveMessage()::class !== ReadyForQuery::class) {
+            }
+        } catch (\Throwable) {
+            // ignore exception
+        }
+    }
+
+    private function free(): void
+    {
+        $this->closed = true;
+        ($this->releaseConn)();
+    }
+}

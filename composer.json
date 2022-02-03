@@ -1,0 +1,51 @@
+{
+    "name": "php-pg/pgconn",
+    "description": "Low-level PostgreSQL database driver",
+    "keywords": [
+        "postgres",
+        "postgresql",
+        "low-level",
+        "driver",
+        "amphp"
+    ],
+    "type": "library",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Dmitry K.",
+            "email": "coder1994@gmail.com"
+        }
+    ],
+    "minimum-stability": "dev",
+    "prefer-stable": true,
+    "require": {
+        "php": ">=8.1",
+        "amphp/amp": "^v3.0.0",
+        "amphp/socket": "^v2.0.0",
+        "php-defer/php-defer": "^5.0",
+        "php-pg/pgproto3": "^v0.0.2",
+        "psr/log": "^3.0",
+        "php-pg/pgpassfile": "^0.0.1",
+        "php-pg/pgservicefile": "^0.0.1"
+    },
+    "autoload": {
+        "psr-4": {
+            "PhpPg\\PgConn\\": "src/"
+        },
+        "files": [
+            "src/Internal/functions.php",
+            "src/Config/Internal/functions.php"
+        ]
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "PhpPg\\PgConn\\Tests\\": "tests/"
+        }
+    },
+    "require-dev": {
+        "phpstan/phpstan": "^1.4",
+        "phpunit/phpunit": "^9.5",
+        "amphp/log": "^v2.0.0",
+        "squizlabs/php_codesniffer": "^3.6"
+    }
+}

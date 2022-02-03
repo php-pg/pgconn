@@ -1,0 +1,117 @@
+name: Continuous Integration
+
+on:
+  - pull_request
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-18.04
+
+    strategy:
+      matrix:
+        php-version: [8.1]
+        pg-version: [9.6, 10, 11, 12, 13, cockroachdb]
+        include:
+          - pg-version: 9.6
+            pg-test-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test
+            pg-test-unix-socket-conn-string: "host=/var/run/postgresql dbname=pg_test"
+            pg-test-tcp-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test
+            pg-test-tls-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test?sslmode=require
+            pg-test-md5-password-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test
+            pg-test-plain-password-conn-string: postgres://pg_pw:secret@127.0.0.1/pg_test
+          - pg-version: 10
+            pg-test-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test
+            pg-test-unix-socket-conn-string: "host=/var/run/postgresql dbname=pg_test"
+            pg-test-tcp-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test
+            pg-test-tls-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test?sslmode=require
+            pg-test-md5-password-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test
+            pg-test-plain-password-conn-string: postgres://pg_pw:secret@127.0.0.1/pg_test
+          - pg-version: 11
+            pg-test-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test
+            pg-test-unix-socket-conn-string: "host=/var/run/postgresql dbname=pg_test"
+            pg-test-tcp-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test
+            pg-test-tls-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test?sslmode=require
+            pg-test-md5-password-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test
+            pg-test-plain-password-conn-string: postgres://pg_pw:secret@127.0.0.1/pg_test
+          - pg-version: 12
+            pg-test-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test
+            pg-test-unix-socket-conn-string: "host=/var/run/postgresql dbname=pg_test"
+            pg-test-tcp-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test
+            pg-test-tls-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test?sslmode=require
+            pg-test-md5-password-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test
+            pg-test-plain-password-conn-string: postgres://pg_pw:secret@127.0.0.1/pg_test
+          - pg-version: 13
+            pg-test-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test
+            pg-test-unix-socket-conn-string: "host=/var/run/postgresql dbname=pg_test"
+            pg-test-tcp-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test
+            pg-test-tls-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test?sslmode=require
+            pg-test-md5-password-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test
+            pg-test-plain-password-conn-string: postgres://pg_pw:secret@127.0.0.1/pg_test
+          - pg-version: cockroachdb
+            pg-test-conn-string: "postgresql://root@127.0.0.1:26257/pg_test?sslmode=disable&experimental_enable_temp_tables=on"
+
+    steps:
+      - name: Set git to use LF
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php-version }}
+          # TODO: Test different event loops
+          extensions: ev
+
+      - name: Get Composer cache directory
+        id: composer-cache
+        run: echo "::set-output name=dir::$(composer config cache-dir)"
+
+      - name: Cache dependencies
+        uses: actions/cache@v2
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: composer-${{ runner.os }}-${{ matrix.php-version }}-${{ hashFiles('**/composer.*') }}-${{ matrix.composer-flags }}
+          restore-keys: |
+            composer-${{ runner.os }}-${{ matrix.php-version }}-${{ hashFiles('**/composer.*') }}-
+            composer-${{ runner.os }}-${{ matrix.php-version }}-
+            composer-${{ runner.os }}-
+            composer-
+
+      - name: Install dependencies
+        uses: nick-invision/retry@v2
+        with:
+          timeout_minutes: 5
+          max_attempts: 5
+          retry_wait_seconds: 30
+          command: |
+            composer update --optimize-autoloader --no-interaction --no-progress ${{ matrix.composer-flags }}
+            composer info -D
+
+      - name: Run static analysis
+        run: vendor/bin/phpstan
+
+      - name: Run style fixer
+        env:
+          PHP_CS_FIXER_IGNORE_ENV: 1
+        run: vendor/bin/phpcbf --standard=PSR12 src
+        if: runner.os != 'Windows'
+
+    - name: Setup database server for testing
+      run: ci/setup_test.bash
+      env:
+        PGVERSION: ${{ matrix.pg-version }}
+
+    - name: Test
+      continue-on-error: ${{ matrix.experimental }}
+      run: vendor/bin/phpunit ${{ matrix.phpunit-flags }}
+      env:
+        PG_TEST_CONN_STRING: ${{ matrix.pg-test-conn-string }}
+        PG_TEST_UNIX_SOCKET_CONN_STRING: ${{ matrix.pg-test-unix-socket-conn-string }}
+        PG_TEST_TCP_CONN_STRING: ${{ matrix.pg-test-tcp-conn-string }}
+        PG_TEST_TLS_CONN_STRING: ${{ matrix.pg-test-tls-conn-string }}
+        PG_TEST_MD5_PASSWORD_CONN_STRING: ${{ matrix.pg-test-md5-password-conn-string }}
+        PG_TEST_PLAIN_PASSWORD_CONN_STRING: ${{ matrix.pg-test-plain-password-conn-string }}
