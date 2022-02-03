@@ -12,15 +12,15 @@ jobs:
       matrix:
         php-version: [8.1]
 #        pg-version: [9.6, 10, 11, 12, 13, cockroachdb]
-        pg-version: [9.6]
+        pg-version: [12]
         include:
-          - pg-version: 9.6
-            pg-test-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test
-            pg-test-unix-socket-conn-string: "host=/var/run/postgresql dbname=pg_test"
-            pg-test-tcp-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test
-            pg-test-tls-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test?sslmode=require
-            pg-test-md5-password-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test
-            pg-test-plain-password-conn-string: postgres://pg_pw:secret@127.0.0.1/pg_test
+#          - pg-version: 9.6
+#            pg-test-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test
+#            pg-test-unix-socket-conn-string: "host=/var/run/postgresql dbname=pg_test"
+#            pg-test-tcp-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test
+#            pg-test-tls-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test?sslmode=require
+#            pg-test-md5-password-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test
+#            pg-test-plain-password-conn-string: postgres://pg_pw:secret@127.0.0.1/pg_test
 #          - pg-version: 10
 #            pg-test-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test
 #            pg-test-unix-socket-conn-string: "host=/var/run/postgresql dbname=pg_test"
@@ -35,13 +35,13 @@ jobs:
 #            pg-test-tls-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test?sslmode=require
 #            pg-test-md5-password-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test
 #            pg-test-plain-password-conn-string: postgres://pg_pw:secret@127.0.0.1/pg_test
-#          - pg-version: 12
-#            pg-test-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test
-#            pg-test-unix-socket-conn-string: "host=/var/run/postgresql dbname=pg_test"
-#            pg-test-tcp-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test
-#            pg-test-tls-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test?sslmode=require
-#            pg-test-md5-password-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test
-#            pg-test-plain-password-conn-string: postgres://pg_pw:secret@127.0.0.1/pg_test
+          - pg-version: 12
+            pg-test-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test
+            pg-test-unix-socket-conn-string: "host=/var/run/postgresql dbname=pg_test"
+            pg-test-tcp-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test
+            pg-test-tls-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test?sslmode=require
+            pg-test-md5-password-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test
+            pg-test-plain-password-conn-string: postgres://pg_pw:secret@127.0.0.1/pg_test
 #          - pg-version: 13
 #            pg-test-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test
 #            pg-test-unix-socket-conn-string: "host=/var/run/postgresql dbname=pg_test"
@@ -108,7 +108,6 @@ jobs:
         if: runner.os != 'Windows'
 
       - name: Test
-        continue-on-error: ${{ matrix.experimental }}
         run: vendor/bin/phpunit ${{ matrix.phpunit-flags }}
         env:
           PG_TEST_CONN_STRING: ${{ matrix.pg-test-conn-string }}
