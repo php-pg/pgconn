@@ -12,11 +12,11 @@ then
   sudo chmod 777 /etc/postgresql/$PGVERSION/main/pg_hba.conf
   echo "local     all         postgres                          trust"    >  /etc/postgresql/$PGVERSION/main/pg_hba.conf
   echo "local     all         all                               trust"    >> /etc/postgresql/$PGVERSION/main/pg_hba.conf
-  echo "host      all         pgx_md5     127.0.0.1/32          md5"      >> /etc/postgresql/$PGVERSION/main/pg_hba.conf
-  echo "host      all         pgx_pw      127.0.0.1/32          password" >> /etc/postgresql/$PGVERSION/main/pg_hba.conf
-  echo "hostssl   all         pgx_ssl     127.0.0.1/32          md5"      >> /etc/postgresql/$PGVERSION/main/pg_hba.conf
-  echo "host      replication pgx_replication 127.0.0.1/32      md5"      >> /etc/postgresql/$PGVERSION/main/pg_hba.conf
-  echo "host      pgx_test pgx_replication 127.0.0.1/32      md5"      >> /etc/postgresql/$PGVERSION/main/pg_hba.conf
+  echo "host      all         pg_md5     127.0.0.1/32           md5"      >> /etc/postgresql/$PGVERSION/main/pg_hba.conf
+  echo "host      all         pg_pw      127.0.0.1/32           password" >> /etc/postgresql/$PGVERSION/main/pg_hba.conf
+  echo "hostssl   all         pg_ssl     127.0.0.1/32           md5"      >> /etc/postgresql/$PGVERSION/main/pg_hba.conf
+  echo "host      replication pg_replication 127.0.0.1/32      md5"      >> /etc/postgresql/$PGVERSION/main/pg_hba.conf
+  echo "host      pg_test pg_replication 127.0.0.1/32      md5"      >> /etc/postgresql/$PGVERSION/main/pg_hba.conf
   sudo chmod 777 /etc/postgresql/$PGVERSION/main/postgresql.conf
   if $(dpkg --compare-versions $PGVERSION ge 9.6) ; then
     echo "wal_level='logical'"     >> /etc/postgresql/$PGVERSION/main/postgresql.conf
@@ -27,14 +27,14 @@ then
 
   # The tricky test user, below, has to actually exist so that it can be used in a test
   # of aclitem formatting. It turns out aclitems cannot contain non-existing users/roles.
-  psql -U postgres -c 'create database pgx_test'
-  psql -U postgres pgx_test -c 'create extension hstore'
-  psql -U postgres pgx_test -c 'create domain uint64 as numeric(20,0)'
-  psql -U postgres -c "create user pgx_ssl SUPERUSER PASSWORD 'secret'"
-  psql -U postgres -c "create user pgx_md5 SUPERUSER PASSWORD 'secret'"
-  psql -U postgres -c "create user pgx_pw  SUPERUSER PASSWORD 'secret'"
+  psql -U postgres -c 'create database pg_test'
+  psql -U postgres pg_test -c 'create extension hstore'
+  psql -U postgres pg_test -c 'create domain uint64 as numeric(20,0)'
+  psql -U postgres -c "create user pg_ssl SUPERUSER PASSWORD 'secret'"
+  psql -U postgres -c "create user pg_md5 SUPERUSER PASSWORD 'secret'"
+  psql -U postgres -c "create user pg_pw  SUPERUSER PASSWORD 'secret'"
   psql -U postgres -c "create user `whoami`"
-  psql -U postgres -c "create user pgx_replication with replication password 'secret'"
+  psql -U postgres -c "create user pg_replication with replication password 'secret'"
   psql -U postgres -c "create user \" tricky, ' } \"\" \\ test user \" superuser password 'secret'"
 fi
 
@@ -43,7 +43,7 @@ then
   wget -qO- https://binaries.cockroachdb.com/cockroach-v20.2.5.linux-amd64.tgz | tar xvz
   sudo mv cockroach-v20.2.5.linux-amd64/cockroach /usr/local/bin/
   cockroach start-single-node --insecure --background --listen-addr=localhost
-  cockroach sql --insecure -e 'create database pgx_test'
+  cockroach sql --insecure -e 'create database pg_test'
 fi
 
 if [ "${CRATEVERSION-}" != "" ]
