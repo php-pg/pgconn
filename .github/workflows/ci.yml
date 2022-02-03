@@ -11,7 +11,8 @@ jobs:
     strategy:
       matrix:
         php-version: [8.1]
-        pg-version: [9.6, 10, 11, 12, 13, cockroachdb]
+#        pg-version: [9.6, 10, 11, 12, 13, cockroachdb]
+        pg-version: [9.6]
         include:
           - pg-version: 9.6
             pg-test-conn-string: postgres://pg_md5:secret@127.0.0.1/pg_test
