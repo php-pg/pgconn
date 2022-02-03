@@ -23,7 +23,7 @@ class PgConnectorTest extends TestCase
     {
         $connString = getenv($env);
         if (false === $connString || '' === $connString) {
-            $this->fail("Missing or empty env var {$env}");
+            $this->markTestSkipped("Missing env {$env}");
         }
 
         $config = parseConfig($connString);
