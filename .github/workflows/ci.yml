@@ -56,6 +56,7 @@ jobs:
         run: |
           git config --global core.autocrlf false
           git config --global core.eol lf
+
       - name: Checkout code
         uses: actions/checkout@v2
 
@@ -100,18 +101,18 @@ jobs:
         run: vendor/bin/phpcbf --standard=PSR12 src
         if: runner.os != 'Windows'
 
-    - name: Setup database server for testing
-      run: ci/setup_test.bash
-      env:
-        PGVERSION: ${{ matrix.pg-version }}
+      - name: Setup database server for testing
+        run: ci/setup_test.bash
+        env:
+          PGVERSION: ${{ matrix.pg-version }}
 
-    - name: Test
-      continue-on-error: ${{ matrix.experimental }}
-      run: vendor/bin/phpunit ${{ matrix.phpunit-flags }}
-      env:
-        PG_TEST_CONN_STRING: ${{ matrix.pg-test-conn-string }}
-        PG_TEST_UNIX_SOCKET_CONN_STRING: ${{ matrix.pg-test-unix-socket-conn-string }}
-        PG_TEST_TCP_CONN_STRING: ${{ matrix.pg-test-tcp-conn-string }}
-        PG_TEST_TLS_CONN_STRING: ${{ matrix.pg-test-tls-conn-string }}
-        PG_TEST_MD5_PASSWORD_CONN_STRING: ${{ matrix.pg-test-md5-password-conn-string }}
-        PG_TEST_PLAIN_PASSWORD_CONN_STRING: ${{ matrix.pg-test-plain-password-conn-string }}
+      - name: Test
+        continue-on-error: ${{ matrix.experimental }}
+        run: vendor/bin/phpunit ${{ matrix.phpunit-flags }}
+        env:
+          PG_TEST_CONN_STRING: ${{ matrix.pg-test-conn-string }}
+          PG_TEST_UNIX_SOCKET_CONN_STRING: ${{ matrix.pg-test-unix-socket-conn-string }}
+          PG_TEST_TCP_CONN_STRING: ${{ matrix.pg-test-tcp-conn-string }}
+          PG_TEST_TLS_CONN_STRING: ${{ matrix.pg-test-tls-conn-string }}
+          PG_TEST_MD5_PASSWORD_CONN_STRING: ${{ matrix.pg-test-md5-password-conn-string }}
+          PG_TEST_PLAIN_PASSWORD_CONN_STRING: ${{ matrix.pg-test-plain-password-conn-string }}
