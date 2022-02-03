@@ -3,20 +3,20 @@ set -eux
 
 if [[ "${PGVERSION-}" =~ ^[0-9.]+$ ]]
 then
-  sudo apt-get remove -y --purge postgresql libpq-dev libpq5 postgresql-client-common postgresql-common
+#  sudo apt-get remove -y --purge postgresql libpq-dev libpq5 postgresql-client-common postgresql-common
   sudo rm -rf /var/lib/postgresql
   wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
-  sudo sh -c "echo deb http://apt.postgresql.org/pub/repos/apt/ $(lsb_release -cs)-pgdg main $PGVERSION >> /etc/apt/sources.list.d/postgresql.list"
+  sudo sh -c "echo deb http://apt.postgresql.org/pub/repos/apt/ $(lsb_release -cs)-php_pgdg main $PGVERSION >> /etc/apt/sources.list.d/postgresql.list"
   sudo apt-get update -qq
   sudo apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::="--force-confnew" install postgresql-$PGVERSION postgresql-server-dev-$PGVERSION postgresql-contrib-$PGVERSION
-  sudo chmod 777 /etc/postgresql/$PGVERSION/main/pg_hba.conf
-  echo "local     all         postgres                          trust"    >  /etc/postgresql/$PGVERSION/main/pg_hba.conf
-  echo "local     all         all                               trust"    >> /etc/postgresql/$PGVERSION/main/pg_hba.conf
-  echo "host      all         pg_md5     127.0.0.1/32           md5"      >> /etc/postgresql/$PGVERSION/main/pg_hba.conf
-  echo "host      all         pg_pw      127.0.0.1/32           password" >> /etc/postgresql/$PGVERSION/main/pg_hba.conf
-  echo "hostssl   all         pg_ssl     127.0.0.1/32           md5"      >> /etc/postgresql/$PGVERSION/main/pg_hba.conf
-  echo "host      replication pg_replication 127.0.0.1/32      md5"      >> /etc/postgresql/$PGVERSION/main/pg_hba.conf
-  echo "host      pg_test pg_replication 127.0.0.1/32      md5"      >> /etc/postgresql/$PGVERSION/main/pg_hba.conf
+  sudo chmod 777 /etc/postgresql/$PGVERSION/main/php_pg_hba.conf
+  echo "local     all         postgres                          trust"    >  /etc/postgresql/$PGVERSION/main/php_pg_hba.conf
+  echo "local     all         all                               trust"    >> /etc/postgresql/$PGVERSION/main/php_pg_hba.conf
+  echo "host      all         php_pg_md5         127.0.0.1/32   md5"      >> /etc/postgresql/$PGVERSION/main/php_pg_hba.conf
+  echo "host      all         php_pg_pw          127.0.0.1/32   password" >> /etc/postgresql/$PGVERSION/main/php_pg_hba.conf
+  echo "hostssl   all         php_pg_ssl         127.0.0.1/32   md5"      >> /etc/postgresql/$PGVERSION/main/php_pg_hba.conf
+  echo "host      replication php_pg_replication 127.0.0.1/32   md5"      >> /etc/postgresql/$PGVERSION/main/php_pg_hba.conf
+  echo "host      php_pg_test php_pg_replication 127.0.0.1/32   md5"      >> /etc/postgresql/$PGVERSION/main/php_pg_hba.conf
   sudo chmod 777 /etc/postgresql/$PGVERSION/main/postgresql.conf
   if $(dpkg --compare-versions $PGVERSION ge 9.6) ; then
     echo "wal_level='logical'"     >> /etc/postgresql/$PGVERSION/main/postgresql.conf
@@ -27,14 +27,14 @@ then
 
   # The tricky test user, below, has to actually exist so that it can be used in a test
   # of aclitem formatting. It turns out aclitems cannot contain non-existing users/roles.
-  psql -U postgres -c 'create database pg_test'
-  psql -U postgres pg_test -c 'create extension hstore'
-  psql -U postgres pg_test -c 'create domain uint64 as numeric(20,0)'
-  psql -U postgres -c "create user pg_ssl SUPERUSER PASSWORD 'secret'"
-  psql -U postgres -c "create user pg_md5 SUPERUSER PASSWORD 'secret'"
-  psql -U postgres -c "create user pg_pw  SUPERUSER PASSWORD 'secret'"
+  psql -U postgres -c 'create database php_pg_test'
+  psql -U postgres php_pg_test -c 'create extension hstore'
+  psql -U postgres php_pg_test -c 'create domain uint64 as numeric(20,0)'
+  psql -U postgres -c "create user php_pg_ssl SUPERUSER PASSWORD 'secret'"
+  psql -U postgres -c "create user php_pg_md5 SUPERUSER PASSWORD 'secret'"
+  psql -U postgres -c "create user php_pg_pw  SUPERUSER PASSWORD 'secret'"
   psql -U postgres -c "create user `whoami`"
-  psql -U postgres -c "create user pg_replication with replication password 'secret'"
+  psql -U postgres -c "create user php_pg_replication with replication password 'secret'"
   psql -U postgres -c "create user \" tricky, ' } \"\" \\ test user \" superuser password 'secret'"
 fi
 
@@ -43,7 +43,7 @@ then
   wget -qO- https://binaries.cockroachdb.com/cockroach-v20.2.5.linux-amd64.tgz | tar xvz
   sudo mv cockroach-v20.2.5.linux-amd64/cockroach /usr/local/bin/
   cockroach start-single-node --insecure --background --listen-addr=localhost
-  cockroach sql --insecure -e 'create database pg_test'
+  cockroach sql --insecure -e 'create database php_pg_test'
 fi
 
 if [ "${CRATEVERSION-}" != "" ]
