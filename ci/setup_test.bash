@@ -6,17 +6,17 @@ then
   sudo apt-get remove -y --purge postgresql libpq-dev libpq5 postgresql-client-common postgresql-common
   sudo rm -rf /var/lib/postgresql
   wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
-  sudo sh -c "echo deb http://apt.postgresql.org/pub/repos/apt/ $(lsb_release -cs)-php_pgdg main $PGVERSION >> /etc/apt/sources.list.d/postgresql.list"
+  sudo sh -c "echo deb http://apt.postgresql.org/pub/repos/apt/ $(lsb_release -cs)-pgdg main $PGVERSION >> /etc/apt/sources.list.d/postgresql.list"
   sudo apt-get update -qq
   sudo apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::="--force-confnew" install postgresql-$PGVERSION postgresql-server-dev-$PGVERSION postgresql-contrib-$PGVERSION
-  sudo chmod 777 /etc/postgresql/$PGVERSION/main/php_pg_hba.conf
-  echo "local     all         postgres                          trust"    >  /etc/postgresql/$PGVERSION/main/php_pg_hba.conf
-  echo "local     all         all                               trust"    >> /etc/postgresql/$PGVERSION/main/php_pg_hba.conf
-  echo "host      all         php_pg_md5         127.0.0.1/32   md5"      >> /etc/postgresql/$PGVERSION/main/php_pg_hba.conf
-  echo "host      all         php_pg_pw          127.0.0.1/32   password" >> /etc/postgresql/$PGVERSION/main/php_pg_hba.conf
-  echo "hostssl   all         php_pg_ssl         127.0.0.1/32   md5"      >> /etc/postgresql/$PGVERSION/main/php_pg_hba.conf
-  echo "host      replication php_pg_replication 127.0.0.1/32   md5"      >> /etc/postgresql/$PGVERSION/main/php_pg_hba.conf
-  echo "host      php_pg_test php_pg_replication 127.0.0.1/32   md5"      >> /etc/postgresql/$PGVERSION/main/php_pg_hba.conf
+  sudo chmod 777 /etc/postgresql/$PGVERSION/main/pg_hba.conf
+  echo "local     all         postgres                          trust"    >  /etc/postgresql/$PGVERSION/main/pg_hba.conf
+  echo "local     all         all                               trust"    >> /etc/postgresql/$PGVERSION/main/pg_hba.conf
+  echo "host      all         php_pg_md5     127.0.0.1/32       md5"      >> /etc/postgresql/$PGVERSION/main/pg_hba.conf
+  echo "host      all         php_pg_pw      127.0.0.1/32       password" >> /etc/postgresql/$PGVERSION/main/pg_hba.conf
+  echo "hostssl   all         php_pg_ssl     127.0.0.1/32       md5"      >> /etc/postgresql/$PGVERSION/main/pg_hba.conf
+  echo "host      replication php_pg_replication 127.0.0.1/32   md5"      >> /etc/postgresql/$PGVERSION/main/pg_hba.conf
+  echo "host      php_pg_test php_pg_replication 127.0.0.1/32   md5"      >> /etc/postgresql/$PGVERSION/main/pg_hba.conf
   sudo chmod 777 /etc/postgresql/$PGVERSION/main/postgresql.conf
   if $(dpkg --compare-versions $PGVERSION ge 9.6) ; then
     echo "wal_level='logical'"     >> /etc/postgresql/$PGVERSION/main/postgresql.conf
