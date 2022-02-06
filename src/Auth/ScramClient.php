@@ -48,6 +48,8 @@ class ScramClient
     /**
      * @param array<string> $hashAlgos
      * @param string $pass
+     *
+     * @throws SASLException
      */
     public function __construct(array $hashAlgos, string $pass)
     {
@@ -74,6 +76,12 @@ class ScramClient
         );
     }
 
+    /**
+     * @param string $data
+     * @return void
+     *
+     * @throws SASLException
+     */
     public function recvServerFirstMessage(string $data): void
     {
         $this->serverFirstMessage = $data;
@@ -147,6 +155,12 @@ class ScramClient
         return sprintf('%s,p=%s', $clientMsgWoProof, $proof);
     }
 
+    /**
+     * @param string $data
+     * @return void
+     *
+     * @throws SASLException
+     */
     public function recvServerFinalMessage(string $data): void
     {
         if (!str_starts_with($data, 'v=')) {

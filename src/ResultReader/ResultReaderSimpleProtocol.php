@@ -53,7 +53,7 @@ class ResultReaderSimpleProtocol implements ResultReaderInterface
     {
         try {
             $this->close();
-        } catch (\Throwable $e) {
+        } catch (\Throwable) {
             // silently ignore errors
         }
     }
@@ -64,11 +64,10 @@ class ResultReaderSimpleProtocol implements ResultReaderInterface
             return;
         }
 
+        $this->closed = true;
+
         // read remaining messages
-        /* @phpstan-ignore-next-line */
-        while (!$this->closed) {
-            $this->receiveMessage();
-        }
+        $this->restoreConnectionState();
     }
 
     /**
@@ -77,6 +76,14 @@ class ResultReaderSimpleProtocol implements ResultReaderInterface
     public function getRowValues(): array
     {
         return $this->rowValues;
+    }
+
+    /**
+     * @return array<FieldDescription>
+     */
+    public function getFieldDescriptions(): array
+    {
+        return $this->fieldDescriptions ?? [];
     }
 
     public function getCommandTag(): CommandTag
@@ -189,5 +196,19 @@ class ResultReaderSimpleProtocol implements ResultReaderInterface
         }
 
         return $msg;
+    }
+
+    private function restoreConnectionState(): void
+    {
+        while (true) {
+            try {
+                if ($this->mrr->receiveMessage($this->cancellation)::class === CommandComplete::class) {
+                    break;
+                }
+            } catch (\Throwable) {
+                // Stop on any error, any further connection state restore logic will do the MultiResultReader
+                break;
+            }
+        }
     }
 }

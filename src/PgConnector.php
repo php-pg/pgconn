@@ -5,15 +5,14 @@ declare(strict_types=1);
 namespace PhpPg\PgConn;
 
 use Amp\ByteStream\ClosedException;
+use Amp\ByteStream\StreamException;
 use Amp\Cancellation;
 use Amp\CancelledException;
 use Amp\Socket\ConnectContext;
 use Amp\Socket\EncryptableSocket;
-use Amp\Socket\SocketException;
-use Amp\Socket\TlsException;
 use PhpPg\PgConn\Auth\ScramClient;
 use PhpPg\PgConn\Config\Config;
-use PhpPg\PgConn\Config\FallbackConfig;
+use PhpPg\PgConn\Config\HostConfig;
 use PhpPg\PgConn\Exception\ConnectException;
 use PhpPg\PgConn\Exception\PgErrorException;
 use PhpPg\PgConn\Exception\SASLException;
@@ -39,55 +38,37 @@ use PhpPg\PgProto3\Messages\SASLInitialResponse;
 use PhpPg\PgProto3\Messages\SASLResponse;
 use PhpPg\PgProto3\Messages\SSLRequest;
 use PhpPg\PgProto3\Messages\StartupMessage;
+use Throwable;
 
-class PgConnector
+use function Amp\Socket\connect;
+use function md5;
+use function str_starts_with;
+
+class PgConnector implements PgConnectorInterface
 {
+    /**
+     * @param Config $config
+     * @param Cancellation|null $cancellation
+     * @return PgConn
+     *
+     * @throws ConnectException
+     * @throws Throwable unhandled error
+     */
     public function connect(Config $config, ?Cancellation $cancellation = null): PgConn
     {
-        $fallbacks = [
-            new FallbackConfig(
-                host: $config->host,
-                port: $config->port,
-                tlsConfig: $config->tlsConfig,
-            )
-        ];
-        \array_push($fallbacks, ...$config->fallbacks);
+        $conn = $this->connectHosts($config, $cancellation);
 
-        $ex = null;
-        $conn = null;
-
-        foreach ($fallbacks as $fallback) {
+        $afterConnectFunc = $config->getAfterConnectFunc();
+        if ($afterConnectFunc !== null) {
             try {
-                $conn = $this->tryConnect($fallback, $config, $cancellation);
-                $ex = null;
-                // stop cycle on successful connect
-                break;
-            } catch (ConnectException $e) {
-                if (($prev = $e->getPrevious()) instanceof PgErrorException) {
-                    /** @var PgErrorException $prev */
-                    // Wrong password or Database does not exist
-                    if ($prev->pgError->sqlState === '28P01' || $prev->pgError->sqlState === '28000') {
-                        throw $e;
-                    }
+                ($afterConnectFunc)($conn);
+            } catch (Throwable $e) {
+                try {
+                    $conn->close();
+                } catch (Throwable) {
+                    // ignore errors
                 }
 
-                $config->logger?->warning(
-                    __METHOD__ . " cannot establish connection to {$fallback->host}:{$fallback->port}",
-                    ['err' => $e->getPrevious()?->getMessage() ?? $e->getMessage()]
-                );
-
-                $ex = $e;
-            }
-        }
-
-        if ($ex !== null) {
-            throw $ex;
-        }
-
-        if ($config->afterConnectFunc !== null) {
-            try {
-                ($config->afterConnectFunc)($conn);
-            } catch (\Throwable $e) {
                 throw new ConnectException('AfterConnect failed', 0, $e);
             }
         }
@@ -95,65 +76,133 @@ class PgConnector
         return $conn;
     }
 
+    /**
+     * @param Config $config
+     * @param Cancellation|null $cancellation
+     * @return PgConn
+     *
+     * @throws ConnectException
+     * @throws Throwable
+     */
+    private function connectHosts(Config $config, ?Cancellation $cancellation): PgConn
+    {
+        $ex = null;
+
+        /**
+         * When multiple hosts are specified, or when a single host name is translated to multiple addresses,
+         * all the hosts and addresses will be tried in order, until one succeeds.
+         * If none of the hosts can be reached, the connection fails.
+         * If a connection is established successfully, but authentication fails,
+         * the remaining hosts in the list are not tried.
+         */
+        foreach ($config->getHosts() as $host) {
+            try {
+                return $this->tryConnect($host, $config, $cancellation);
+            } catch (ConnectException $e) {
+                $ex = $e;
+
+                $prev = $e->getPrevious();
+                if ($prev instanceof PgErrorException) {
+                    // Wrong password or database does not exist
+                    if ($prev->pgError->sqlState === '28P01' || $prev->pgError->sqlState === '28000') {
+                        throw $e;
+                    }
+                }
+
+                $config->getLogger()?->warning(
+                    __METHOD__ . " cannot establish connection to {$host->getHost()}:{$host->getPort()}",
+                    ['err' => $e->getPrevious()?->getMessage() ?? $e->getMessage()]
+                );
+            } catch (Throwable $e) {
+                $config->getLogger()?->error(
+                    __METHOD__ . " unknown error while connecting to {$host->getHost()}:{$host->getPort()}",
+                    ['err' => $e->getPrevious()?->getMessage() ?? $e->getMessage()]
+                );
+
+                // Throw any unhandled errors
+                throw $e;
+            }
+        }
+
+        if ($ex === null) {
+            throw new \LogicException('Host is not connected and there is no error, probably bug occurred');
+        }
+
+        throw $ex;
+    }
+
+    /**
+     * @param HostConfig $hostConfig
+     * @param Config $config
+     * @param Cancellation|null $cancellation
+     * @return PgConn
+     *
+     * @throws ConnectException
+     */
     private function tryConnect(
-        FallbackConfig $fallbackConfig,
+        HostConfig $hostConfig,
         Config $config,
         ?Cancellation $cancellation = null,
     ): PgConn {
         $connCtx = (new ConnectContext())
-            ->withTlsContext($fallbackConfig->tlsConfig)
-            ->withConnectTimeout($config->connectTimeout);
+            ->withMaxAttempts(1)
+            ->withTlsContext($hostConfig->getTlsConfig()->tlsContext ?? null)
+            ->withConnectTimeout($config->getConnectTimeout());
 
-        if (\str_starts_with($fallbackConfig->host, '/')) {
-            $address = "unix://{$fallbackConfig->host}.s.PGSQL.{$fallbackConfig->port}";
+        $host = $hostConfig->getHost();
+        $port = $hostConfig->getPort();
+
+        if (str_starts_with($host, '/')) {
+            $address = "unix://{$host}.s.PGSQL.{$port}";
         } else {
-            $address = "tcp://{$fallbackConfig->host}:{$fallbackConfig->port}";
+            $address = "tcp://{$host}:{$port}";
         }
 
         try {
-            $socket = \Amp\Socket\connect(
+            $socket = connect(
                 $address,
                 $connCtx,
                 $cancellation,
             );
-        } catch (\Amp\Socket\ConnectException | \Amp\CancelledException $e) {
+        } catch (\Amp\Socket\ConnectException | CancelledException $e) {
             throw new ConnectException('Unable to connect to Postgres', 0, $e);
         }
 
-        if ($config->buildFrontendFunc !== null) {
-            $frontend = ($config->buildFrontendFunc)(
-                new ChunkReader($socket),
+        $buildFrontendFunc = $config->getBuildFrontendFunc();
+        if ($buildFrontendFunc !== null) {
+            $frontend = ($buildFrontendFunc)(
+                new ChunkReader($socket, $config->getMinReadBufferSize()),
                 $socket,
+                $config->getLogger(),
             );
         } else {
             $frontend = new Frontend(
-                new ChunkReader($socket),
+                new ChunkReader($socket, $config->getMinReadBufferSize()),
                 $socket,
-                $config->logger,
+                $config->getLogger(),
             );
         }
 
         $ctx = new ConnectorContext(
             config: $config,
+            hostConfig: $hostConfig,
             socket: $socket,
             frontend: $frontend,
             cancellation: $cancellation,
         );
 
-        if ($fallbackConfig->tlsConfig !== null) {
-            $this->startTLS($ctx, $fallbackConfig);
-        }
+        $this->startTLS($ctx, $hostConfig);
 
         $startupMsg = new StartupMessage(
             protocolVersion: StartupMessage::PROTOCOL_VERSION_NUMBER,
-            parameters: $config->runtimeParams,
+            parameters: $config->getRuntimeParams(),
         );
-        $startupMsg->parameters['user'] = $config->user;
-        if ($config->database !== '') {
-            $startupMsg->parameters['database'] = $config->database;
+        $startupMsg->parameters['user'] = $config->getUser();
+        if ($config->getDatabase() !== '') {
+            $startupMsg->parameters['database'] = $config->getDatabase();
         }
 
-        $this->connectSafeSendMessage($ctx, $startupMsg);
+        $this->sendMessage($ctx, $startupMsg);
 
         // login phase
         $this->authenticate($ctx);
@@ -164,8 +213,13 @@ class PgConnector
         $txStatus = '';
 
         // fetching parameters phase
+        $messagesCnt = 0;
         while (true) {
-            $msg = $this->connectSafeReceiveMessage($ctx);
+            if (++$messagesCnt > 1000) {
+                throw new ConnectException('Connection failed due to infinite loop detected');
+            }
+
+            $msg = $this->receiveMessage($ctx);
 
             switch ($msg::class) {
                 case BackendKeyData::class:
@@ -179,14 +233,12 @@ class PgConnector
 
                 case ReadyForQuery::class:
                     $txStatus = $msg->txStatus;
-                    $config->logger?->info(__METHOD__ . ' ready for query');
+                    $config->getLogger()?->info(__METHOD__ . ' ready for query');
                     break 2;
 
                 default:
-                    $socket->close();
-
                     throw new ConnectException(
-                        'Unexpected message received',
+                        'Connection failed due to unexpected message received',
                         0,
                         new UnexpectedMessageException($msg::class)
                     );
@@ -194,26 +246,28 @@ class PgConnector
         }
 
         $conn = new PgConn(
-            $socket,
-            $config,
-            $frontend,
-            $pid,
-            $secretKey,
-            $txStatus,
-            $parameterStatuses,
+            socket: $socket,
+            config: $config,
+            hostConfig: $hostConfig,
+            frontend: $frontend,
+            pid: $pid,
+            secretKey: $secretKey,
+            txStatus: $txStatus,
+            parameterStatuses: $parameterStatuses,
         );
 
-        if ($config->validateConnectFunc !== null) {
+        $validateConnectFunc = $config->getValidateConnectFunc();
+        if ($validateConnectFunc !== null) {
             try {
-                ($config->validateConnectFunc)($conn);
-            } catch (\Throwable $e) {
+                ($validateConnectFunc)($conn);
+            } catch (Throwable $e) {
                 try {
                     $conn->close();
-                } catch (\Throwable) {
+                } catch (Throwable) {
                     // ignore errors
                 }
 
-                throw new ConnectException('ValidationConnection failed', 0, $e);
+                throw new ConnectException('ValidateConnection failed', 0, $e);
             }
         }
 
@@ -222,20 +276,27 @@ class PgConnector
 
     /**
      * @param ConnectorContext $ctx
+     * @param HostConfig $hostConfig
      * @return void
+     *
      * @throws ConnectException
      */
-    private function startTLS(ConnectorContext $ctx, FallbackConfig $fallbackConfig): void
+    private function startTLS(ConnectorContext $ctx, HostConfig $hostConfig): void
     {
+        $tlsConfig = $hostConfig->getTlsConfig();
+        if ($tlsConfig === null) {
+            return;
+        }
+
         if (!$ctx->socket instanceof EncryptableSocket) {
             throw new ConnectException('Socket does not support TLS encryption');
         }
 
-        $this->connectSafeSendMessage($ctx, new SSLRequest());
+        $this->sendMessage($ctx, new SSLRequest());
 
         $byte = $ctx->socket->read($ctx->cancellation, 1);
         if ($byte === null) {
-            throw new ConnectException('Connection closed by server');
+            throw new ConnectException('Connection closed by the server');
         }
 
         if ($byte !== 'N' && $byte !== 'S') {
@@ -244,8 +305,8 @@ class PgConnector
 
         if ($byte !== 'S') {
             // Allow server to refuse TLS
-            if ($fallbackConfig->sslMode->isServerAllowedToRefuseTls()) {
-                $ctx->config->logger?->info(__METHOD__ . ' server refused SSLRequest, TLS is not enabled');
+            if ($tlsConfig->sslMode->isServerAllowedToRefuseTls()) {
+                $ctx->config->getLogger()?->info(__METHOD__ . ' server refused SSLRequest, TLS is not enabled');
 
                 return;
             }
@@ -257,13 +318,19 @@ class PgConnector
             /** @var EncryptableSocket $socket PHPStan */
             $socket = $ctx->socket;
             $socket->setupTls($ctx->cancellation);
-        } catch (TlsException | SocketException | CancelledException $e) {
+        } catch (StreamException | CancelledException $e) {
             throw new ConnectException('TLS initialization error', 0, $e);
         }
 
-        $ctx->config->logger?->info(__METHOD__ . ' TLS enabled');
+        $ctx->config->getLogger()?->info(__METHOD__ . ' TLS enabled');
     }
 
+    /**
+     * @param ConnectorContext $ctx
+     * @return void
+     *
+     * @throws ConnectException
+     */
     private function authenticate(ConnectorContext $ctx): void
     {
         // prevent infinite recursion
@@ -271,20 +338,20 @@ class PgConnector
         $maxHops = 5;
 
         while ($iter < $maxHops) {
-            $msg = $this->connectSafeReceiveMessage($ctx);
+            $msg = $this->receiveMessage($ctx);
 
             switch ($msg::class) {
                 case AuthenticationOk::class:
-                    $ctx->config->logger?->info(__METHOD__ . ' auth ok');
+                    $ctx->config->getLogger()?->info(__METHOD__ . ' auth ok');
                     return;
 
                 case AuthenticationCleartextPassword::class:
-                    $this->txPasswordMessage($ctx, $ctx->config->password);
+                    $this->txPasswordMessage($ctx, $ctx->hostConfig->getPassword());
                     break;
 
                 case AuthenticationMd5Password::class:
                     $digestedPassword = "md5" . md5(
-                        md5($ctx->config->password . $ctx->config->user) . $msg->salt
+                        md5($ctx->hostConfig->getPassword() . $ctx->config->getUser()) . $msg->salt
                     );
 
                     $this->txPasswordMessage($ctx, $digestedPassword);
@@ -294,34 +361,30 @@ class PgConnector
                     try {
                         $this->handleSasl($ctx, $msg->authMechanisms);
                     } catch (SASLException $e) {
-                        $ctx->socket->close();
-
-                        throw new ConnectException('SCRAM protocol error', 0, $e);
+                        throw new ConnectException('Connection failed due to SCRAM protocol flow error', 0, $e);
                     }
                     break;
 
                 default:
-                    $ctx->socket->close();
-
                     throw new ConnectException(
-                        'Unexpected message received',
+                        'Connection failed due to unexpected message received',
                         0,
-                        new UnexpectedMessageException($msg::class)
+                        new UnexpectedMessageException($msg::class),
                     );
             }
 
             $iter++;
         }
 
-        $ctx->socket->close();
-
-        throw new ConnectException('Recursion detected on authenticate');
+        throw new ConnectException('Connection failed due to infinite loop detected during authentication step');
     }
 
     /**
      * @param ConnectorContext $ctx
      * @param string $password
      * @return void
+     *
+     * @throws ConnectException
      */
     private function txPasswordMessage(ConnectorContext $ctx, string $password): void
     {
@@ -329,12 +392,14 @@ class PgConnector
             password: $password,
         );
 
-        $this->connectSafeSendMessage($ctx, $passwordMessage);
+        $this->sendMessage($ctx, $passwordMessage);
     }
 
     /**
+     * @param ConnectorContext $ctx
      * @param array<string> $serverAuthMechanisms
      * @return void
+     *
      * @throws ConnectException
      * @throws SASLException
      */
@@ -344,7 +409,7 @@ class PgConnector
     ): void {
         $client = new ScramClient(
             $serverAuthMechanisms,
-            $ctx->config->password,
+            $ctx->hostConfig->getPassword(),
         );
 
         $resp = $client->getFirstMessage();
@@ -354,13 +419,15 @@ class PgConnector
             data: $resp,
         );
 
-        $this->connectSafeSendMessage($ctx, $firstMsg);
+        $this->sendMessage($ctx, $firstMsg);
 
-        $msg = $this->connectSafeReceiveMessage($ctx);
+        $msg = $this->receiveMessage($ctx);
         if (!$msg instanceof AuthenticationSASLContinue) {
-            $ctx->socket->close();
-
-            throw new UnexpectedMessageException($msg::class, 'AuthenticationSASLContinue');
+            throw new ConnectException(
+                'Connection failed due to unexpected message received',
+                0,
+                new UnexpectedMessageException($msg::class, 'AuthenticationSASLContinue'),
+            );
         }
 
         $client->recvServerFirstMessage($msg->data);
@@ -369,13 +436,15 @@ class PgConnector
             data: $client->getClientFinalMessage(),
         );
 
-        $this->connectSafeSendMessage($ctx, $secondMsg);
+        $this->sendMessage($ctx, $secondMsg);
 
-        $msg = $this->connectSafeReceiveMessage($ctx);
+        $msg = $this->receiveMessage($ctx);
         if (!$msg instanceof AuthenticationSASLFinal) {
-            $ctx->socket->close();
-
-            throw new UnexpectedMessageException($msg::class, 'AuthenticationSASLFinal');
+            throw new ConnectException(
+                'Connection failed due to unexpected message received',
+                0,
+                new UnexpectedMessageException($msg::class, 'AuthenticationSASLFinal'),
+            );
         }
 
         $client->recvServerFinalMessage($msg->data);
@@ -385,67 +454,44 @@ class PgConnector
      * @param ConnectorContext $ctx
      * @return BackendMessageInterface
      *
-     * @throws CancelledException
-     * @throws ClosedException
-     * @throws \PhpPg\PgConn\Exception\PgErrorException
-     * @throws UnknownMessageTypeException
-     * @throws UnknownAuthMessageTypeException
-     */
-    protected function receiveMessage(ConnectorContext $ctx): BackendMessageInterface
-    {
-        $message = $ctx->frontend->receive($ctx->cancellation);
-        if ($message::class === ErrorResponse::class) {
-            throw Internal\getPgErrorExceptionFromMessage($message);
-        }
-
-        return $message;
-    }
-
-    /**
-     * @return BackendMessageInterface
      * @throws ConnectException
      */
-    protected function connectSafeReceiveMessage(ConnectorContext $ctx): BackendMessageInterface
+    private function receiveMessage(ConnectorContext $ctx): BackendMessageInterface
     {
         try {
-            return $this->receiveMessage($ctx);
-        } catch (PgErrorException $e) {
-            $ctx->socket->close();
-
-            throw new ConnectException('Connection failed due to Postgres error', 0, $e);
+            $msg = $ctx->frontend->receive($ctx->cancellation);
         } catch (ClosedException $e) {
-            $ctx->socket->close();
-
-            throw new ConnectException('Connection closed', 0, $e);
-        } catch (UnknownMessageTypeException $e) {
-            $ctx->socket->close();
-
-            throw new ConnectException('Unknown message received', 0, $e);
-        } catch (UnknownAuthMessageTypeException $e) {
-            $ctx->socket->close();
-
-            throw new ConnectException('Unknown auth message received', 0, $e);
+            throw new ConnectException('Connection closed by the server', 0, $e);
         } catch (CancelledException $e) {
-            $ctx->socket->close();
-
-            throw new ConnectException('Connection cancelled', 0, $e);
-        } catch (\Throwable $e) {
-            $ctx->socket->close();
-
-            throw $e;
+            throw new ConnectException('Connection cancelled by user', 0, $e);
+        } catch (UnknownMessageTypeException | UnknownAuthMessageTypeException $e) {
+            throw new ConnectException('Connection failed due to unknown message received', 0, $e);
         }
+
+        if ($msg::class === ErrorResponse::class) {
+            throw new ConnectException(
+                'Connection failed due to Postgres error',
+                0,
+                Internal\getPgErrorExceptionFromMessage($msg)
+            );
+        }
+
+        return $msg;
     }
 
     /**
+     * @param ConnectorContext $ctx
+     * @param FrontendMessageInterface $msg
+     * @return void
+     *
      * @throws ConnectException
      */
-    protected function connectSafeSendMessage(ConnectorContext $ctx, FrontendMessageInterface $msg): void
+    private function sendMessage(ConnectorContext $ctx, FrontendMessageInterface $msg): void
     {
         try {
             $ctx->frontend->send($msg);
         } catch (ClosedException $e) {
-            $msgName = $msg::class;
-            throw new ConnectException("Unable to send {$msgName}", 0, $e);
+            throw new ConnectException('Connection closed by the server', 0, $e);
         }
     }
 }

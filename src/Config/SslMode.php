@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace PhpPg\PgConn;
+namespace PhpPg\PgConn\Config;
 
 // phpcs:ignoreFile
 // since PHPCS does not support enums

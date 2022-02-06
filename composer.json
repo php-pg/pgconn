@@ -22,8 +22,7 @@
         "php": ">=8.1",
         "amphp/amp": "^v3.0.0",
         "amphp/socket": "^v2.0.0",
-        "php-defer/php-defer": "^5.0",
-        "php-pg/pgproto3": "^v0.0.2",
+        "php-pg/pgproto3": "^v0.0.4",
         "psr/log": "^3.0",
         "php-pg/pgpassfile": "^0.0.1",
         "php-pg/pgservicefile": "^0.0.1"

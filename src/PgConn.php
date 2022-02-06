@@ -8,12 +8,13 @@ use Amp\ByteStream\ClosedException;
 use Amp\Cancellation;
 use Amp\CancelledException;
 use Amp\Socket\Socket;
+use Amp\TimeoutCancellation;
 use PhpPg\PgConn\Config\Config;
+use PhpPg\PgConn\Config\HostConfig;
 use PhpPg\PgConn\Exception\PgErrorException;
 use PhpPg\PgConn\ResultReader\MultiResultReader;
 use PhpPg\PgConn\ResultReader\ResultReaderExtendedProtocol;
-use PhpPg\PgProto3\Exception\UnknownAuthMessageTypeException;
-use PhpPg\PgProto3\Exception\UnknownMessageTypeException;
+use PhpPg\PgProto3\Exception\ProtoException;
 use PhpPg\PgProto3\FrontendInterface;
 use PhpPg\PgProto3\Messages;
 
@@ -24,6 +25,7 @@ class PgConn
     public function __construct(
         private Socket $socket,
         private Config $config,
+        private HostConfig $hostConfig,
         private FrontendInterface $frontend,
         private int $pid = 0,
         private int $secretKey = 0,
@@ -45,6 +47,11 @@ class PgConn
     public function getConfig(): Config
     {
         return $this->config;
+    }
+
+    public function getHostConfig(): HostConfig
+    {
+        return $this->hostConfig;
     }
 
     public function getStatus(): PgConnStatus
@@ -95,6 +102,11 @@ class PgConn
         return $this->parameterStatuses[$key] ?? '';
     }
 
+    public function getSocket(): Socket
+    {
+        return $this->socket;
+    }
+
     public function close(): void
     {
         if ($this->status === PgConnStatus::CLOSED) {
@@ -108,8 +120,8 @@ class PgConn
 
         try {
             $this->frontend->send(new Messages\Terminate());
-        } catch (ClosedException) {
-            // silently ignore connection error
+        } catch (\Throwable) {
+            // silently ignore any error
         }
 
         $this->socket->close();
@@ -125,15 +137,26 @@ class PgConn
      * @return MultiResultReader
      *
      * @throws ClosedException
-     * @throws PgErrorException
      */
-    public function query(string $sql, ?Cancellation $cancellation = null): MultiResultReader
+    public function exec(string $sql, ?Cancellation $cancellation = null): MultiResultReader
     {
+        $cancellation?->throwIfRequested();
+
         $this->lock();
 
-        $this->frontend->send(new Messages\Query(query: $sql));
+        try {
+            $this->frontend->send(new Messages\Query(query: $sql));
+        } catch (\Throwable $e) {
+            $this->close();
 
-        return new MultiResultReader($this, $this->unlock(...), $cancellation);
+            throw $e;
+        }
+
+        $cancelCbId = $cancellation?->subscribe(function () {
+            $this->cancelRequest(new TimeoutCancellation(10));
+        });
+
+        return new MultiResultReader($this, $this->unlock(...), $cancellation, $cancelCbId ?? null);
     }
 
     /**
@@ -144,48 +167,74 @@ class PgConn
      * @param array<int> $paramOIDs
      * @param Cancellation|null $cancellation
      * @return StatementDescription
+     *
+     * @throws ClosedException
+     * @throws PgErrorException
+     * @throws ProtoException
      */
     public function prepare(
         string $name,
         string $sql,
-        array $paramOIDs,
+        array $paramOIDs = [],
         ?Cancellation $cancellation = null,
     ): StatementDescription {
+        $cancellation?->throwIfRequested();
+
         $this->lock();
-        defer($_, $this->unlock(...));
 
         $msgs = [];
         $msgs[] = new Messages\Parse(name: $name, query: $sql, parameterOIDs: $paramOIDs);
         $msgs[] = new Messages\Describe(objectType: 'S', name: $name);
         $msgs[] = new Messages\Sync();
 
-        $this->frontend->sendBulk($msgs);
+        try {
+            $this->frontend->sendBulk($msgs);
+        } catch (\Throwable $e) {
+            $this->close();
+
+            throw $e;
+        }
 
         $fetchedParamOIDs = [];
         $fetchedFields = [];
 
-        while (true) {
-            try {
-                $msg = $this->receiveMessage($cancellation);
-            } catch (PgErrorException $e) {
-                // Restore connection to a valid state on non-FATAL error
-                if ($e->pgError->severity !== 'FATAL') {
-                    $this->restoreConnectionState();
+        $cancelCbId = $cancellation?->subscribe(function () {
+            $this->cancelRequest(new TimeoutCancellation(10));
+        });
+
+        try {
+            while (true) {
+                try {
+                    $msg = $this->receiveMessage($cancellation);
+                } catch (PgErrorException $e) {
+                    if ($e->pgError->severity === 'FATAL') {
+                        $cancellation?->unsubscribe($cancelCbId ?? '');
+                    } else {
+                        $this->restoreConnectionState($cancellation);
+                    }
+
+                    throw $e;
+                } catch (CancelledException) {
+                    $cancellation?->unsubscribe($cancelCbId ?? '');
+                    $cancellation = null;
+
+                    continue;
                 }
 
-                throw $e;
+                switch ($msg::class) {
+                    case Messages\ParameterDescription::class:
+                        $fetchedParamOIDs = $msg->parameterOIDs;
+                        break;
+                    case Messages\RowDescription::class:
+                        $fetchedFields = $msg->fields;
+                        break;
+                    case Messages\ReadyForQuery::class:
+                        break 2;
+                }
             }
-
-            switch ($msg::class) {
-                case Messages\ParameterDescription::class:
-                    $fetchedParamOIDs = $msg->parameterOIDs;
-                    break;
-                case Messages\RowDescription::class:
-                    $fetchedFields = $msg->fields;
-                    break;
-                case Messages\ReadyForQuery::class:
-                    break 2;
-            }
+        } finally {
+            $cancellation?->unsubscribe($cancelCbId ?? '');
+            $this->unlock();
         }
 
         return new StatementDescription($name, $sql, $fetchedParamOIDs, $fetchedFields);
@@ -193,121 +242,6 @@ class PgConn
 
     /**
      * Execution of a prepared statement via the PostgreSQL extended query protocol.
-     *
-     * @param StatementDescription $stmt
-     *
-     * @param array<?string> $paramValues are the parameter values.
-     * It must be encoded in the format given by paramFormats.
-     *
-     * @param array<int> $paramFormats is an array of format codes determining for each paramValue column
-     * whether it is encoded in text or binary format.
-     * If paramFormats is empty all params are text format.
-     * execPrepared will fail if count(paramFormats) is not 0, 1, or count(paramValues).
-     *
-     * @param array<int> $resultFormats is an array of format codes determining for each result column
-     * whether it is encoded in text or binary format.
-     * If resultFormats is empty all results will be in text format.
-     *
-     * @param Cancellation|null $cancellation
-     *
-     * @return ResultReaderExtendedProtocol
-     *
-     * @throws ClosedException
-     * @throws PgErrorException
-     * @throws \InvalidArgumentException
-     */
-    public function executePrepared(
-        StatementDescription $stmt,
-        array $paramValues,
-        array $paramFormats,
-        array $resultFormats,
-        ?Cancellation $cancellation = null
-    ): ResultReaderExtendedProtocol {
-        $this->validateExecParams($paramFormats, $paramValues);
-
-        $this->lock();
-
-        $msgs = [];
-        $msgs[] = new Messages\Bind(
-            preparedStatement: $stmt->name,
-            parameterFormatCodes: $paramFormats,
-            parameters: $paramValues,
-            resultFormatCodes: $resultFormats
-        );
-        $msgs[] = new Messages\Execute();
-        $msgs[] = new Messages\Sync();
-
-        $this->frontend->sendBulk($msgs);
-
-        return new ResultReaderExtendedProtocol(
-            conn: $this,
-            releaseConn: $this->unlock(...),
-            fieldDescriptions: $stmt->fields,
-            cancellation: $cancellation,
-        );
-    }
-
-    /**
-     * Execution of a prepared statement via the PostgreSQL extended query protocol.
-     *
-     * @param array<?string> $paramValues are the parameter values.
-     * It must be encoded in the format given by paramFormats.
-     *
-     * @param array<int> $paramOIDs
-     *
-     * @param array<int> $paramFormats is an array of format codes determining for each paramValue column
-     * whether it is encoded in text or binary format.
-     * If paramFormats is empty all params are text format.
-     * execPrepared will fail if count(paramFormats) is not 0, 1, or count(paramValues).
-     *
-     * @param array<int> $resultFormats is an array of format codes determining for each result column
-     * whether it is encoded in text or binary format.
-     * If resultFormats is empty all results will be in text format.
-     *
-     * @param Cancellation|null $cancellation
-     *
-     * @return ResultReaderExtendedProtocol
-     *
-     * @throws ClosedException
-     * @throws PgErrorException
-     * @throws \InvalidArgumentException
-     */
-    public function executeParams(
-        string $sql,
-        array $paramValues,
-        array $paramOIDs,
-        array $paramFormats,
-        array $resultFormats,
-        ?Cancellation $cancellation = null
-    ): ResultReaderExtendedProtocol {
-        $this->validateExecParams($paramFormats, $paramValues);
-
-        $this->lock();
-
-        $msgs = [];
-        $msgs[] = new Messages\Parse(query: $sql, parameterOIDs: $paramOIDs);
-        $msgs[] = new Messages\Bind(
-            parameterFormatCodes: $paramFormats,
-            parameters: $paramValues,
-            resultFormatCodes: $resultFormats
-        );
-        $msgs[] = new Messages\Describe(objectType: 'P');
-        $msgs[] = new Messages\Execute();
-        $msgs[] = new Messages\Sync();
-
-        $this->frontend->sendBulk($msgs);
-
-        return new ResultReaderExtendedProtocol(
-            conn: $this,
-            releaseConn: $this->unlock(...),
-            // result reader will catch RowDescription message on its own
-            fieldDescriptions: null,
-            cancellation: $cancellation,
-        );
-    }
-
-    /**
-     * Execution of a prepared statement by name via the PostgreSQL extended query protocol.
      *
      * @param string $stmtName
      *
@@ -328,17 +262,18 @@ class PgConn
      * @return ResultReaderExtendedProtocol
      *
      * @throws ClosedException
-     * @throws PgErrorException
      * @throws \InvalidArgumentException
      */
-    public function executePreparedByName(
+    public function execPrepared(
         string $stmtName,
-        array $paramValues,
-        array $paramFormats,
-        array $resultFormats,
-        ?Cancellation $cancellation = null,
+        array $paramValues = [],
+        array $paramFormats = [],
+        array $resultFormats = [],
+        ?Cancellation $cancellation = null
     ): ResultReaderExtendedProtocol {
         $this->validateExecParams($paramFormats, $paramValues);
+
+        $cancellation?->throwIfRequested();
 
         $this->lock();
 
@@ -353,39 +288,246 @@ class PgConn
         $msgs[] = new Messages\Execute();
         $msgs[] = new Messages\Sync();
 
-        $this->frontend->sendBulk($msgs);
+        try {
+            $this->frontend->sendBulk($msgs);
+        } catch (\Throwable $e) {
+            $this->close();
+
+            throw $e;
+        }
+
+        $cancelCbId = $cancellation?->subscribe(function () {
+            $this->cancelRequest(new TimeoutCancellation(10));
+        });
 
         return new ResultReaderExtendedProtocol(
             conn: $this,
-            // result reader will catch RowDescription message on its own
             releaseConn: $this->unlock(...),
+            // result reader will catch RowDescription message on its own
             fieldDescriptions: null,
             cancellation: $cancellation,
+            cancelCbId: $cancelCbId,
         );
     }
 
+    /**
+     * Execution of a prepared statement via the PostgreSQL extended query protocol.
+     *
+     * @param array<?string> $paramValues are the parameter values.
+     * It must be encoded in the format given by paramFormats.
+     *
+     * @param array<int> $paramOIDs
+     *
+     * @param array<int> $paramFormats is an array of format codes determining for each paramValue column
+     * whether it is encoded in text or binary format.
+     * If paramFormats is empty all params are text format.
+     * execPrepared will fail if count(paramFormats) is not 0, 1, or count(paramValues).
+     *
+     * @param array<int> $resultFormats is an array of format codes determining for each result column
+     * whether it is encoded in text or binary format.
+     * If resultFormats is empty all results will be in text format.
+     *
+     * @param Cancellation|null $cancellation
+     *
+     * @return ResultReaderExtendedProtocol
+     *
+     * @throws ClosedException
+     * @throws \InvalidArgumentException
+     */
+    public function execParams(
+        string $sql,
+        array $paramValues = [],
+        array $paramOIDs = [],
+        array $paramFormats = [],
+        array $resultFormats = [],
+        ?Cancellation $cancellation = null
+    ): ResultReaderExtendedProtocol {
+        $this->validateExecParams($paramFormats, $paramValues);
+
+        $cancellation?->throwIfRequested();
+
+        $this->lock();
+
+        $msgs = [];
+        $msgs[] = new Messages\Parse(query: $sql, parameterOIDs: $paramOIDs);
+        $msgs[] = new Messages\Bind(
+            parameterFormatCodes: $paramFormats,
+            parameters: $paramValues,
+            resultFormatCodes: $resultFormats
+        );
+        $msgs[] = new Messages\Describe(objectType: 'P');
+        $msgs[] = new Messages\Execute();
+        $msgs[] = new Messages\Sync();
+
+        try {
+            $this->frontend->sendBulk($msgs);
+        } catch (\Throwable $e) {
+            $this->close();
+
+            throw $e;
+        }
+
+        $cancelCbId = $cancellation?->subscribe(function () {
+            $this->cancelRequest(new TimeoutCancellation(10));
+        });
+
+        $rr = new ResultReaderExtendedProtocol(
+            conn: $this,
+            releaseConn: $this->unlock(...),
+            // result reader will catch RowDescription message on its own
+            fieldDescriptions: null,
+            cancellation: $cancellation,
+            cancelCbId: $cancelCbId,
+        );
+        $rr->readUntilRowDescription();
+
+        return $rr;
+    }
+
+    /**
+     * @param Cancellation|null $cancellation
+     * @return Notification
+     *
+     * @throws CancelledException
+     * @throws ClosedException
+     * @throws PgErrorException
+     * @throws ProtoException
+     */
     public function waitForNotification(?Cancellation $cancellation = null): Notification
     {
+        $cancellation?->throwIfRequested();
+
         $this->lock();
-        defer($_, $this->unlock(...));
 
-        while (true) {
-            $msg = $this->receiveMessage($cancellation);
+        try {
+            while (true) {
+                $msg = $this->receiveMessage($cancellation);
 
-            if ($msg::class === Messages\NotificationResponse::class) {
-                return Internal\getNotificationFromMessage($msg);
+                if ($msg::class === Messages\NotificationResponse::class) {
+                    return Internal\getNotificationFromMessage($msg);
+                }
             }
+        } finally {
+            $this->unlock();
         }
     }
 
-    public function cancelRequest(): void
+    /**
+     * @param Cancellation|null $cancellation
+     * @return void
+     * @throws CancelledException
+     * @throws ClosedException
+     * @throws \Amp\ByteStream\StreamException
+     * @throws \Amp\Socket\ConnectException
+     */
+    public function cancelRequest(?Cancellation $cancellation = null): void
     {
+        $cancellation?->throwIfRequested();
+
         $remote = $this->socket->getRemoteAddress()->toString();
-        $sock = \Amp\Socket\connect($remote);
+        $sock = \Amp\Socket\connect($remote, null, $cancellation);
 
         $data = (new Messages\CancelRequest(processId: $this->pid, secretKey: $this->secretKey))->encode();
         $sock->write($data);
         $sock->close();
+    }
+
+    /**
+     * Receive message from PostgreSQL and perform basic handling
+     *
+     * @param Cancellation|null $cancellation
+     * @return Messages\BackendMessageInterface
+     *
+     * @throws CancelledException
+     * @throws ClosedException
+     * @throws PgErrorException
+     * @throws ProtoException
+     *
+     * @internal Do not call in external code, this is low level method to accept Postgres Protocol message.
+     * Calling this method in external code may break Postgres connection state.
+     */
+    public function receiveMessage(?Cancellation $cancellation = null): Messages\BackendMessageInterface
+    {
+        try {
+            $msg = $this->frontend->receive($cancellation);
+        } catch (ClosedException | ProtoException $e) {
+            /**
+             * From: Postgres Protocol Flow (51.2.8. Termination)
+             * Closing the connection is also advisable if an unrecognizable message type is received,
+             * since this probably indicates loss of message-boundary sync.
+             */
+            $this->close();
+
+            throw $e;
+        }
+
+        switch ($msg::class) {
+            case Messages\ParameterStatus::class:
+                $this->parameterStatuses[$msg->name] = $msg->value;
+                break;
+
+            case Messages\ReadyForQuery::class:
+                $this->txStatus = $msg->txStatus;
+                break;
+
+            case Messages\NoticeResponse::class:
+                $onNotice = $this->config->getOnNotice();
+                if ($onNotice !== null) {
+                    ($onNotice)(Internal\getNoticeFromMessage($msg));
+                }
+                break;
+
+            case Messages\NotificationResponse::class:
+                $onNotification = $this->config->getOnNotification();
+                if ($onNotification !== null) {
+                    ($onNotification)(Internal\getNotificationFromMessage($msg));
+                }
+                break;
+
+            case Messages\ErrorResponse::class:
+                // Connection is already broken
+                if ($msg->getSeverity() === 'FATAL') {
+                    $this->close();
+                }
+
+                throw Internal\getPgErrorExceptionFromMessage($msg);
+        }
+
+        return $msg;
+    }
+
+    /**
+     * Restore connection after NON-FATAL error
+     *
+     * @param Cancellation|null $cancellation
+     * @return void
+     *
+     * @throws ClosedException
+     * @throws ProtoException
+     *
+     * @internal Do not call in external code, this is low level method to accept Postgres Protocol message.
+     * Calling this method in external code may break Postgres connection state.
+     */
+    public function restoreConnectionState(?Cancellation $cancellation = null): void
+    {
+        while (true) {
+            try {
+                if ($this->receiveMessage($cancellation)::class === Messages\ReadyForQuery::class) {
+                    break;
+                }
+            } catch (PgErrorException $e) {
+                if ($e->pgError->severity === 'FATAL') {
+                    // stop on FATAL error
+                    break;
+                }
+
+                // don't stop on Postgres error exception
+                continue;
+            } catch (CancelledException) {
+                $cancellation = null;
+                continue;
+            }
+        }
     }
 
     /**
@@ -411,67 +553,6 @@ class PgConn
         }
     }
 
-    /**
-     * @return Messages\BackendMessageInterface
-     *
-     * @throws ClosedException
-     * @throws CancelledException
-     * @throws UnknownMessageTypeException
-     * @throws UnknownAuthMessageTypeException
-     * @throws PgErrorException
-     *
-     * @internal Do not call in external code, this is low level method to accept Postgres Protocol message.
-     * Calling this method in external code may put Postgres connection into broken state.
-     *
-     */
-    public function receiveMessage(?Cancellation $cancellation = null): Messages\BackendMessageInterface
-    {
-        try {
-            $msg = $this->frontend->receive($cancellation);
-        } catch (ClosedException | UnknownMessageTypeException | UnknownAuthMessageTypeException $e) {
-            /**
-             * From: Postgres Protocol Flow (51.2.8. Termination)
-             * Closing the connection is also advisable if an unrecognizable message type is received,
-             * since this probably indicates loss of message-boundary sync.
-             */
-            $this->close();
-
-            throw $e;
-        }
-
-        switch ($msg::class) {
-            case Messages\ParameterStatus::class:
-                $this->parameterStatuses[$msg->name] = $msg->value;
-                break;
-
-            case Messages\ReadyForQuery::class:
-                $this->txStatus = $msg->txStatus;
-                break;
-
-            case Messages\NoticeResponse::class:
-                if ($this->config->onNotice !== null) {
-                    ($this->config->onNotice)(Internal\getNoticeFromMessage($msg));
-                }
-                break;
-
-            case Messages\NotificationResponse::class:
-                if ($this->config->onNotification !== null) {
-                    ($this->config->onNotification)(Internal\getNotificationFromMessage($msg));
-                }
-                break;
-
-            case Messages\ErrorResponse::class:
-                // Connection is already broken
-                if ($msg->getSeverity() === 'FATAL') {
-                    $this->close();
-                }
-
-                throw Internal\getPgErrorExceptionFromMessage($msg);
-        }
-
-        return $msg;
-    }
-
     private function lock(): void
     {
         match ($this->status) {
@@ -495,16 +576,5 @@ class PgConn
         }
 
         $this->status = PgConnStatus::IDLE;
-    }
-
-    private function restoreConnectionState(): void
-    {
-        try {
-            // TODO: Respect cancellation?
-            while ($this->receiveMessage()::class !== Messages\ReadyForQuery::class) {
-            }
-        } catch (\Throwable) {
-            // ignore exception
-        }
     }
 }

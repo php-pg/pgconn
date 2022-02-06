@@ -12,9 +12,9 @@ class UnexpectedMessageException extends ConnectException
     public function __construct(string $receivedMsg, ?string $expectedMsg = null)
     {
         if ($expectedMsg === null) {
-            $msg = \sprintf('Received unexpected message: %s', $receivedMsg);
+            $msg = "Received unexpected message: {$receivedMsg}";
         } else {
-            $msg = \sprintf('Received unexpected message: %s, while expected: %s', $receivedMsg, $expectedMsg);
+            $msg = "Received unexpected message: {$receivedMsg}, while expected: {$expectedMsg}";
         }
 
         parent::__construct($msg);

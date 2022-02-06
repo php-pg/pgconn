@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PhpPg\PgConn\ResultReader;
 
 use PhpPg\PgProto3\Messages\CommandTag;
+use PhpPg\PgProto3\Messages\FieldDescription;
 
 /**
  * Represents results of one SQL command
@@ -17,6 +18,11 @@ interface ResultReaderInterface
      * @return array<?string>
      */
     public function getRowValues(): array;
+
+    /**
+     * @return array<FieldDescription>
+     */
+    public function getFieldDescriptions(): array;
 
     public function getCommandTag(): CommandTag;
 

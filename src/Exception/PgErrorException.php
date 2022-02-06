@@ -6,7 +6,7 @@ namespace PhpPg\PgConn\Exception;
 
 use PhpPg\PgConn\PgError;
 
-class PgErrorException extends \RuntimeException
+class PgErrorException extends \Exception
 {
     public function __construct(
         public PgError $pgError,

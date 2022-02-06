@@ -4,6 +4,6 @@ declare(strict_types=1);
 
 namespace PhpPg\PgConn\Exception;
 
-class ConnectException extends \RuntimeException
+class ConnectException extends \Exception
 {
 }

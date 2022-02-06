@@ -21,11 +21,16 @@ class MultiResultReader
 {
     private bool $closed = false;
     private ?ResultReaderInterface $reader = null;
+    /**
+     * @var array<Result>|null
+     */
+    private ?array $partialResults = null;
 
     public function __construct(
         private PgConn $conn,
         private \Closure $releaseConn,
         private ?Cancellation $cancellation = null,
+        private ?string $cancelCbId = null,
     ) {
     }
 
@@ -38,16 +43,24 @@ class MultiResultReader
         }
     }
 
+    /**
+     * @return void
+     * @throws ClosedException
+     * @throws \PhpPg\PgProto3\Exception\ProtoException
+     */
     public function close(): void
     {
         if ($this->closed) {
             return;
         }
 
-        // read remaining messages
-        /* @phpstan-ignore-next-line */
-        while (!$this->closed) {
-            $this->receiveMessage();
+        $this->closed = true;
+
+        try {
+            $this->conn->restoreConnectionState($this->cancellation);
+        } finally {
+            $this->cancellation?->unsubscribe($this->cancelCbId ?? '');
+            ($this->releaseConn)();
         }
     }
 
@@ -57,7 +70,6 @@ class MultiResultReader
     }
 
     /**
-     *
      * @return array<Result>
      *
      * @throws ClosedException
@@ -68,9 +80,32 @@ class MultiResultReader
     {
         $results = [];
 
-        while ($this->nextResult()) {
-            $results[] = $this->getResult()->getResult();
+        try {
+            while ($this->nextResult()) {
+                $results[] = $this->getResultReader()->getResult();
+            }
+        } catch (\Throwable $e) {
+            $this->partialResults = $results;
+
+            throw $e;
         }
+
+        return $results;
+    }
+
+    /**
+     * Returns partial results from readAll() on error
+     *
+     * @return array<Result>
+     */
+    public function getPartialResults(): array
+    {
+        $results = $this->partialResults;
+        if ($results === null) {
+            throw new \LogicException('Partial results are only available when readAll() throws an exception');
+        }
+
+        $this->partialResults = null;
 
         return $results;
     }
@@ -101,7 +136,25 @@ class MultiResultReader
 
         // We will not say that there are no results until we get ReadyForQuery message
         while (!$this->closed) {
-            $msg = $this->receiveMessage($this->cancellation);
+            try {
+                $msg = $this->receiveMessage($this->cancellation);
+            } catch (CancelledException) {
+                /**
+                 * From: Postgres Wire Protocol Flow (53.2.7. Canceling Requests in Progress)
+                 *
+                 * The cancellation signal might or might not have any effect — for example,
+                 * if it arrives after the backend has finished processing the query, then it will have no effect.
+                 * If the cancellation is effective,
+                 * it results in the current command being terminated early with an error message.
+                 *
+                 * The upshot of all this is that for reasons of both security and efficiency,
+                 * the frontend has no direct way to tell whether a cancel request has succeeded.
+                 * It must continue to wait for the backend to respond to the query.
+                 * Issuing a cancel simply improves the odds that the current query will finish soon,
+                 * and improves the odds that it will fail with an error message instead of succeeding.
+                 */
+                continue;
+            }
 
             switch ($msg::class) {
                 case RowDescription::class:
@@ -128,7 +181,7 @@ class MultiResultReader
         return false;
     }
 
-    public function getResult(): ResultReaderInterface
+    public function getResultReader(): ResultReaderInterface
     {
         if ($this->reader === null) {
             throw new \LogicException('Call nextResult first');
@@ -138,14 +191,15 @@ class MultiResultReader
     }
 
     /**
+     * @param Cancellation|null $cancellation
      * @return BackendMessageInterface
      *
+     * @throws CancelledException
      * @throws ClosedException
      * @throws PgErrorException
-     * @throws CancelledException
+     * @throws \PhpPg\PgProto3\Exception\ProtoException
      * @internal Do not call in external code, this is low level method to accept Postgres Protocol message.
      * Calling this method in external code may put Postgres connection into broken state.
-     *
      */
     public function receiveMessage(?Cancellation $cancellation = null): BackendMessageInterface
     {
@@ -155,11 +209,9 @@ class MultiResultReader
 
         try {
             $message = $this->conn->receiveMessage($cancellation);
-        } catch (ClosedException $e) {
-            $this->free();
-
-            throw $e;
         } catch (PgErrorException $e) {
+            $this->closed = true;
+
             /**
              * In the event of an error, ErrorResponse is issued followed by ReadyForQuery.
              * All further processing of the query string is aborted by ErrorResponse
@@ -167,12 +219,26 @@ class MultiResultReader
              * Note that this might occur partway through the sequence of messages generated by an individual query.
              */
 
-            if ($e->pgError->severity !== 'FATAL') {
+            if ($e->pgError->severity === 'FATAL') {
+                $this->cancellation?->unsubscribe($this->cancelCbId ?? '');
+            } else {
                 // Finalize reading on Postgres error (put connection back to a valid state)
-                $this->restoreConnectionState();
+                $this->conn->restoreConnectionState($cancellation);
             }
 
-            $this->free();
+            ($this->releaseConn)();
+
+            throw $e;
+        } catch (CancelledException $e) {
+            $this->cancellation?->unsubscribe($this->cancelCbId ?? '');
+            $this->cancellation = null;
+            $this->cancelCbId = null;
+
+            throw $e;
+        } catch (\Throwable $e) {
+            $this->closed = true;
+            $this->cancellation?->unsubscribe($this->cancelCbId ?? '');
+            ($this->releaseConn)();
 
             throw $e;
         }
@@ -194,27 +260,12 @@ class MultiResultReader
              * ReadyForQuery will always be sent, whether processing terminates successfully or with an error.
              */
             case ReadyForQuery::class:
-                $this->free();
+                $this->closed = true;
+                $this->cancellation?->unsubscribe($this->cancelCbId ?? '');
+                ($this->releaseConn)();
                 break;
         }
 
         return $message;
-    }
-
-    private function restoreConnectionState(): void
-    {
-        try {
-            // TODO: Respect cancellation?
-            while ($this->receiveMessage()::class !== ReadyForQuery::class) {
-            }
-        } catch (\Throwable) {
-            // ignore exception
-        }
-    }
-
-    private function free(): void
-    {
-        $this->closed = true;
-        ($this->releaseConn)();
     }
 }
