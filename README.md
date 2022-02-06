@@ -86,7 +86,7 @@ $conn = $pgConnector->connect($conf);
 ```
 
 ## API
-PgConn is not concurrency it should be pooled for concurrent access.
+PgConn is not concurrency safe, it should be used inside connection pool.
 
 Methods:
 * `PgConn::close(): void` - Disconnect from the server
