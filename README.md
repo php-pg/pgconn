@@ -1,7 +1,7 @@
 # pgconn
 
 Package pgconn is a low-level PostgreSQL database driver. It operates at nearly the same level as the C library libpq.
-Applications should handle normal queries with a higher level library and only use pgconn directly when required for
+Applications should handle normal queries with a higher level library and only use pgconn directly when needed for
 low-level access to PostgreSQL functionality.
 
 ## Connecting
@@ -86,7 +86,7 @@ $conn = $pgConnector->connect($conf);
 ```
 
 ## API
-PgConn is not concurrency safe, it should be used inside connection pool.
+PgConn is not concurrency safe, it should be used inside a connection pool.
 
 Methods:
 * `PgConn::close(): void` - Disconnect from the server
@@ -126,7 +126,7 @@ $rows[0][0] // query 1 row 1 column 2
 
 $results[0]->getFieldDescriptions(); // query 1 returned rows format information (binary/text, data type, column name, etc)
 
-// Fetch results in iteration way
+// Fetch results in iterative way
 while ($mrr->nextResult()) {
     $rr = $mrr->getResultReader();
     $fieldDescriptions = $rr->getFieldDescriptions()
@@ -146,7 +146,7 @@ while ($mrr->nextResult()) {
 }
 ```
 
-* `PgConn::execParams` - Execute query using extended protocol (parameter bindings allowed), multiple queries not allowed
+* `PgConn::execParams` - Execute query using extended protocol (parameter bindings allowed), multiple queries are not allowed
 ```php
 /** @var \PhpPg\PgConn\PgConn $conn */
 $rr = $conn->execParams(
@@ -189,7 +189,7 @@ $rr = $conn->execPrepared(
     // parameter formats (1 - text; 0 - binary
     // One item per each paramValue or one item for all paramValues
     paramFormats: [],
-    // desired return rows format, such as paramFormats
+    // desired format of returned rows, such as paramFormats
     resultFormats: [],
 );
 $result = $rr->getResult();
@@ -203,7 +203,7 @@ $result->getCommandTag(); // command execution result
 Any of API calls can be canceled using AMPHP cancellation objects. \
 When cancellation occurs, library sends `CancelRequest` message to the PostgreSQL server.
 
-But there is **important note** from PostgreSQL Protocol Flow:
+But there is an **important note** from the PostgreSQL Protocol Flow:
 
 The cancellation signal might or **might not** have any effect — for example, 
 if it arrives after the backend has finished processing the query, then it will have no effect. \
