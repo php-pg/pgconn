@@ -37,7 +37,8 @@ jobs:
 #            pg-test-plain-password-conn-string: postgres://php_pg_pw:secret@127.0.0.1/php_pg_test
           - pg-version: 12
             pg-test-conn-string: postgres://php_pg_md5:secret@127.0.0.1/php_pg_test
-            pg-test-unix-socket-conn-string: "host=/var/run/postgresql dbname=php_pg_test"
+            # disable UNIX socket
+#            pg-test-unix-socket-conn-string: "host=/var/run/postgresql dbname=php_pg_test"
             pg-test-tcp-conn-string: postgres://php_pg_md5:secret@127.0.0.1/php_pg_test
             pg-test-tls-conn-string: postgres://php_pg_md5:secret@127.0.0.1/php_pg_test?sslmode=require
             pg-test-md5-password-conn-string: postgres://php_pg_md5:secret@127.0.0.1/php_pg_test
