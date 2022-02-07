@@ -153,7 +153,7 @@ class PgConnector implements PgConnectorInterface
         $port = $hostConfig->getPort();
 
         if (str_starts_with($host, '/')) {
-            $address = "unix://{$host}.s.PGSQL.{$port}";
+            $address = "unix://{$host}/.s.PGSQL.{$port}";
         } else {
             $address = "tcp://{$host}:{$port}";
         }

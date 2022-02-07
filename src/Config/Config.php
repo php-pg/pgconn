@@ -76,12 +76,6 @@ class Config
         if ($hosts === []) {
             throw new \InvalidArgumentException('At least one host required');
         }
-
-        foreach ($hosts as $idx => $host) {
-            if (!$host instanceof HostConfig) {
-                throw new \InvalidArgumentException("Host at index {$idx} must be an instance of HostConfig");
-            }
-        }
     }
 
     /**
@@ -171,8 +165,10 @@ class Config
     {
         $this->validateHosts($hosts);
 
-        $this->hosts = $hosts;
-        return $this;
+        $clone = clone $this;
+        $clone->hosts = $hosts;
+
+        return $clone;
     }
 
     public function withDatabase(string $database): Config
@@ -272,7 +268,7 @@ class Config
         $clone = clone $this;
         $clone->onNotification = $onNotification;
 
-        return $this;
+        return $clone;
     }
 
     public function withMinReadBufferSize(int $minReadBufferSize): Config

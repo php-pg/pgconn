@@ -300,7 +300,7 @@ class PgConn
             $this->cancelRequest(new TimeoutCancellation(10));
         });
 
-        return new ResultReaderExtendedProtocol(
+        $rr = new ResultReaderExtendedProtocol(
             conn: $this,
             releaseConn: $this->unlock(...),
             // result reader will catch RowDescription message on its own
@@ -308,6 +308,9 @@ class PgConn
             cancellation: $cancellation,
             cancelCbId: $cancelCbId,
         );
+        $rr->readUntilRowDescription();
+
+        return $rr;
     }
 
     /**
@@ -553,17 +556,22 @@ class PgConn
         }
     }
 
+    /**
+     * @throws Exception\LockException
+     */
     private function lock(): void
     {
         match ($this->status) {
-            PgConnStatus::CLOSED => throw new \LogicException('Lock error: Connection closed'),
-            PgConnStatus::BUSY => throw new \LogicException('Lock error: Connection busy'),
+            PgConnStatus::CLOSED, PgConnStatus::BUSY => throw new Exception\LockException($this->status),
             default => null,
         };
 
         $this->status = PgConnStatus::BUSY;
     }
 
+    /**
+     * @throws Exception\UnlockException
+     */
     private function unlock(): void
     {
         if ($this->status === PgConnStatus::CLOSED) {
@@ -572,7 +580,7 @@ class PgConn
         }
 
         if ($this->status !== PgConnStatus::BUSY) {
-            throw new \LogicException('Unlock error: Cannot unlock not busy connection');
+            throw new Exception\UnlockException($this->status);
         }
 
         $this->status = PgConnStatus::IDLE;

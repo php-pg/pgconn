@@ -15,13 +15,6 @@ class ValidateConnectChain implements ValidateConnectFuncInterface
     public function __construct(
         private array $chain
     ) {
-        foreach ($this->chain as $idx => $item) {
-            if (!$item instanceof ValidateConnectFuncInterface) {
-                throw new \InvalidArgumentException(
-                    "Item at {$idx} must be an instance of ValidateConnectFuncInterface"
-                );
-            }
-        }
     }
 
     public function __invoke(PgConn $conn): void

@@ -4,7 +4,12 @@ namespace PhpPg\PgConn\Tests;
 
 use Amp\CancelledException;
 use Amp\TimeoutCancellation;
+use PhpPg\PgConn\Config\NoticeHandlerInterface;
+use PhpPg\PgConn\Config\NotificationHandlerInterface;
+use PhpPg\PgConn\Exception\LockException;
 use PhpPg\PgConn\Exception\PgErrorException;
+use PhpPg\PgConn\Notice;
+use PhpPg\PgConn\Notification;
 use PhpPg\PgConn\PgConn;
 use PhpPg\PgConn\PgConnector;
 use PHPUnit\Framework\TestCase;
@@ -39,9 +44,16 @@ class PgConnTest extends TestCase
         $this->conn = (new PgConnector())->connect($config);
     }
 
-    private function ensureConnectionValid(): void
+    protected function tearDown(): void
     {
-        $res = $this->conn
+        $this->conn->close();
+
+        parent::tearDown();
+    }
+
+    private function ensureConnectionValid(?PgConn $conn = null): void
+    {
+        $res = ($conn ?? $this->conn)
             ->execParams(
                 'select generate_series(1,$1)',
                 ['3'],
@@ -52,10 +64,10 @@ class PgConnTest extends TestCase
             )
             ->getResult();
 
-        self::assertCount(3, $res->rows);
-        self::assertSame('1', $res->rows[0][0]);
-        self::assertSame('2', $res->rows[1][0]);
-        self::assertSame('3', $res->rows[2][0]);
+        self::assertCount(3, $res->getRows());
+        self::assertSame('1', $res->getRows()[0][0]);
+        self::assertSame('2', $res->getRows()[1][0]);
+        self::assertSame('3', $res->getRows()[2][0]);
     }
 
     public function testPrepareSyntaxError(): void
@@ -71,6 +83,7 @@ class PgConnTest extends TestCase
 
     public function testPrepareCancelled(): void
     {
+        // TODO: Test actually does nothing
         $cancellation = new TimeoutCancellation(0.0001);
 
         try {
@@ -87,76 +100,68 @@ class PgConnTest extends TestCase
 
     public function testExec(): void
     {
-        try {
-            $results = $this->conn->exec("select 'Hello, world'")->readAll();
+        $results = $this->conn->exec("select 'Hello, world'")->readAll();
 
-            self::assertCount(1, $results);
-            self::assertSame('SELECT 1', (string)$results[0]->commandTag);
-            self::assertSame('Hello, world', $results[0]->rows[0][0]);
-        } finally {
-            $this->ensureConnectionValid();
-        }
+        self::assertCount(1, $results);
+        self::assertSame('SELECT 1', (string)$results[0]->getCommandTag());
+        self::assertSame('Hello, world', $results[0]->getRows()[0][0]);
+
+        $this->ensureConnectionValid();
     }
 
     public function testExecEmpty(): void
     {
-        try {
-            $mrr = $this->conn->exec(";");
-            $results = [];
-            while ($mrr->nextResult()) {
-                $rr = $mrr->getResultReader();
-                while ($rr->nextRow()) {
-                    $results[] = $rr->getResult();
-                }
-
-                $rr->getCommandTag();
+        $mrr = $this->conn->exec(";");
+        $results = [];
+        while ($mrr->nextResult()) {
+            $rr = $mrr->getResultReader();
+            while ($rr->nextRow()) {
+                $results[] = $rr->getResult();
             }
 
-            self::assertCount(0, $results);
-        } finally {
-            $this->ensureConnectionValid();
+            $rr->getCommandTag();
         }
+
+        self::assertCount(0, $results);
+
+        $this->ensureConnectionValid();
     }
 
     public function testExecMultipleQueries(): void
     {
-        try {
-            $results = $this->conn->exec("select 'Hello, world'; select 1")->readAll();
+        $results = $this->conn->exec("select 'Hello, world'; select 1")->readAll();
 
-            self::assertCount(2, $results);
+        self::assertCount(2, $results);
 
-            self::assertSame('SELECT 1', (string)$results[0]->commandTag);
-            self::assertSame('Hello, world', $results[0]->rows[0][0]);
+        self::assertSame('SELECT 1', (string)$results[0]->getCommandTag());
+        self::assertSame('Hello, world', $results[0]->getRows()[0][0]);
 
-            self::assertSame('SELECT 1', (string)$results[1]->commandTag);
-            self::assertSame('1', $results[1]->rows[0][0]);
-        } finally {
-            $this->ensureConnectionValid();
-        }
+        self::assertSame('SELECT 1', (string)$results[1]->getCommandTag());
+        self::assertSame('1', $results[1]->getRows()[0][0]);
+
+        $this->ensureConnectionValid();
     }
 
     public function testExecMultipleQueriesEagerFieldDescriptions(): void
     {
-        try {
-            $mrr = $this->conn->exec("select 'Hello, world' as msg; select 1 as num");
+        $mrr = $this->conn->exec("select 'Hello, world' as msg; select 1 as num");
 
-            self::assertTrue($mrr->nextResult());
-            self::assertCount(1, $mrr->getResultReader()->getFieldDescriptions());
-            self::assertSame('msg', $mrr->getResultReader()->getFieldDescriptions()[0]->name);
+        self::assertTrue($mrr->nextResult());
+        self::assertCount(1, $mrr->getResultReader()->getFieldDescriptions());
+        self::assertSame('msg', $mrr->getResultReader()->getFieldDescriptions()[0]->name);
 
-            $mrr->getResultReader()->close();
+        $mrr->getResultReader()->close();
 
-            self::assertTrue($mrr->nextResult());
-            self::assertCount(1, $mrr->getResultReader()->getFieldDescriptions());
-            self::assertSame('num', $mrr->getResultReader()->getFieldDescriptions()[0]->name);
+        self::assertTrue($mrr->nextResult());
+        self::assertCount(1, $mrr->getResultReader()->getFieldDescriptions());
+        self::assertSame('num', $mrr->getResultReader()->getFieldDescriptions()[0]->name);
 
-            $mrr->getResultReader()->close();
+        $mrr->getResultReader()->close();
 
-            self::assertFalse($mrr->nextResult());
-            $mrr->close();
-        } finally {
-            $this->ensureConnectionValid();
-        }
+        self::assertFalse($mrr->nextResult());
+        $mrr->close();
+
+        $this->ensureConnectionValid();
     }
 
     public function testExecMultipleQueriesError(): void
@@ -176,8 +181,8 @@ class PgConnTest extends TestCase
             self::assertSame('22012', $err->pgError->sqlState);
 
             self::assertCount(1, $results);
-            self::assertCount(1, $results[0]->rows);
-            self::assertSame('1', $results[0]->rows[0][0]);
+            self::assertCount(1, $results[0]->getRows());
+            self::assertSame('1', $results[0]->getRows()[0][0]);
         } finally {
             $this->ensureConnectionValid();
         }
@@ -219,6 +224,7 @@ SQL;
     public function testExecCancelled(): void
     {
         $this->expectException(PgErrorException::class);
+        $this->expectExceptionMessage('ERROR: canceling statement due to user request (SQLSTATE 57014)');
 
         try {
             $this->conn->exec(
@@ -246,23 +252,21 @@ SQL;
 
     public function testExecParams(): void
     {
-        try {
-            $result = $this->conn->execParams('select $1::text as msg', ['Hello, world']);
-            self::assertCount(1, $result->getFieldDescriptions());
-            self::assertSame('msg', $result->getFieldDescriptions()[0]->name);
+        $result = $this->conn->execParams('select $1::text as msg', ['Hello, world']);
+        self::assertCount(1, $result->getFieldDescriptions());
+        self::assertSame('msg', $result->getFieldDescriptions()[0]->name);
 
-            $rowCount = 0;
-            while ($result->nextRow()) {
-                $rowCount++;
+        $rowCount = 0;
+        while ($result->nextRow()) {
+            $rowCount++;
 
-                self::assertSame('Hello, world', $result->getRowValues()[0]);
-            }
-
-            self::assertSame(1, $rowCount);
-            self::assertSame('SELECT 1', (string)$result->getCommandTag());
-        } finally {
-            $this->ensureConnectionValid();
+            self::assertSame('Hello, world', $result->getRowValues()[0]);
         }
+
+        self::assertSame(1, $rowCount);
+        self::assertSame('SELECT 1', (string)$result->getCommandTag());
+
+        $this->ensureConnectionValid();
     }
 
     public function testExecParamsDeferredError(): void
@@ -312,13 +316,11 @@ SQL;
 
         $sql = 'values ' . \implode(', ', $params);
 
-        try {
-            $result = $this->conn->execParams($sql, $args)->getResult();
-            self::assertCount(\count($params), $result->rows);
-        } finally {
-            \ini_set('memory_limit', $oldLimit);
-            $this->ensureConnectionValid();
-        }
+        $result = $this->conn->execParams($sql, $args)->getResult();
+        self::assertCount(\count($params), $result->getRows());
+
+        \ini_set('memory_limit', $oldLimit);
+        $this->ensureConnectionValid();
     }
 
     public function testExecParamsTooManyParams(): void
@@ -349,6 +351,7 @@ SQL;
     public function testExecParamsCancelled(): void
     {
         $this->expectException(PgErrorException::class);
+        $this->expectExceptionMessage('ERROR: canceling statement due to user request (SQLSTATE 57014)');
 
         try {
             $result = $this->conn->execParams(
@@ -376,16 +379,317 @@ SQL;
 
     public function testExecParamsEmptySQL(): void
     {
-        try {
-            $res = $this->conn->execParams(sql: '')->getResult();
+        $res = $this->conn->execParams(sql: '')->getResult();
 
-            self::assertCount(0, $res->fieldDescriptions);
-            self::assertCount(0, $res->rows);
-            self::assertSame('', (string)$res->commandTag);
+        self::assertCount(0, $res->getFieldDescriptions());
+        self::assertCount(0, $res->getRows());
+        self::assertSame('', (string)$res->getCommandTag());
+
+        $this->ensureConnectionValid();
+    }
+
+    public function testExecPrepared(): void
+    {
+        $stmt = $this->conn->prepare('ps1', 'select $1::text as msg');
+
+        self::assertCount(1, $stmt->paramOIDs);
+        self::assertCount(1, $stmt->fields);
+
+        $rr = $this->conn->execPrepared('ps1', ['Hello World']);
+        self::assertCount(1, $rr->getFieldDescriptions());
+
+        $result = $rr->getResult();
+        self::assertCount(1, $result->getRows());
+        self::assertSame('SELECT 1', (string)$result->getCommandTag());
+
+        $this->ensureConnectionValid();
+    }
+
+    public function testExecPreparedMaxNumberOfParams(): void
+    {
+        // Increase memory limit to store many parameters
+        $oldLimit = \ini_set('memory_limit', '256M');
+
+        $args = [];
+        $params = [];
+        for ($i = 0; $i < 65535; $i++) {
+            $params[] = \sprintf('($%d::text)', $i + 1);
+            $args[] = (string)$i;
+        }
+
+        $sql = 'values ' . \implode(', ', $params);
+
+        $stmt = $this->conn->prepare('ps1', $sql);
+        self::assertCount(\count($params), $stmt->paramOIDs);
+        self::assertCount(1, $stmt->fields);
+
+        $rr = $this->conn->execPrepared($stmt->name, $args);
+        $result = $rr->getResult();
+
+        self::assertCount(\count($params), $result->getRows());
+
+        \ini_set('memory_limit', $oldLimit);
+        $this->ensureConnectionValid();
+    }
+
+    public function testExecPreparedTooManyParams(): void
+    {
+        // Increase memory limit to store many parameters
+        $oldLimit = \ini_set('memory_limit', '256M');
+
+        $args = [];
+        $params = [];
+        for ($i = 0; $i < 65536; $i++) {
+            $params[] = \sprintf('($%d::text)', $i + 1);
+            $args[] = (string)$i;
+        }
+
+        $sql = 'values ' . \implode(', ', $params);
+
+
+        if ($this->conn->getParameterStatus('crdb_version') !== '') {
+            // CockroachDB rejects preparing a statement with more than 65535 parameters.
+            $this->expectException(PgErrorException::class);
+            $this->expectExceptionMessage('ERROR: more than 65535 arguments to prepared statement: 65536 (SQLSTATE 08P01)');
+
+            try {
+                $this->conn->prepare('ps1', $sql, []);
+            } finally {
+                \ini_set('memory_limit', $oldLimit);
+                $this->ensureConnectionValid();
+            }
+        } else {
+            $stmt = $this->conn->prepare('ps1', $sql, []);
+            // PostgreSQL accepts preparing a statement with more than 65535 parameters
+            // and only fails when executing it through the extended protocol.
+            self::assertCount(1, $stmt->fields);
+            self::assertCount(\count($params), $stmt->paramOIDs);
+
+            $this->expectException(\InvalidArgumentException::class);
+            $this->expectExceptionMessage('Extended protocol limited to 65535 parameters');
+
+            try {
+                $this->conn->execPrepared($stmt->name, $args);
+            } finally {
+                \ini_set('memory_limit', $oldLimit);
+                $this->ensureConnectionValid();
+            }
+        }
+    }
+
+    public function testExecPreparedCancelled(): void
+    {
+        $this->expectException(PgErrorException::class);
+        $this->expectExceptionMessage('ERROR: canceling statement due to user request (SQLSTATE 57014)');
+
+        try {
+            $stmt = $this->conn->prepare('ps1', 'SELECT current_database(), pg_sleep(1)');
+            $result = $this->conn->execPrepared(
+                stmtName: 'ps1',
+                cancellation: new TimeoutCancellation(0.1),
+            )->getResult();
         } finally {
             $this->ensureConnectionValid();
         }
     }
 
+    public function testExecPreparedPreCancelled(): void
+    {
+        $this->expectException(CancelledException::class);
 
+        $cancellation = new TimeoutCancellation(0.01);
+        delay(0.1);
+
+        try {
+            $stmt = $this->conn->prepare('ps1', 'SELECT current_database(), pg_sleep(1)');
+            $result = $this->conn->execPrepared(
+                stmtName: 'ps1',
+                cancellation: $cancellation,
+            )->getResult();
+        } finally {
+            $this->ensureConnectionValid();
+        }
+    }
+
+    public function testExecPreparedEmptySql(): void
+    {
+        $stmt = $this->conn->prepare('ps1', '');
+        $result = $this->conn->execPrepared(stmtName: 'ps1')->getResult();
+
+        self::assertSame('', (string)$result->getCommandTag());
+        self::assertCount(0, $result->getRows());
+        self::assertCount(0, $result->getFieldDescriptions());
+
+        $this->ensureConnectionValid();
+    }
+
+    public function testConnLock(): void
+    {
+        $mrr = $this->conn->exec("SELECT 'Hello, world'");
+
+        $err = null;
+        try {
+            $this->conn->exec("SELECT 'Hello, world'");
+        } catch (LockException $e) {
+            $err = $e;
+        }
+
+        self::assertInstanceOf(LockException::class, $err);
+        self::assertSame('Lock error: Connection BUSY', $err->getMessage());
+
+        $results = $mrr->readAll();
+        self::assertCount(1, $results);
+        self::assertSame('SELECT 1', (string)$results[0]->getCommandTag());
+        self::assertCount(1, $results[0]->getRows());
+        self::assertSame('Hello, world', $results[0]->getRows()[0][0]);
+
+        $this->ensureConnectionValid();
+    }
+
+    public function testOnNotice(): void
+    {
+        $notice = null;
+        $conf = $this->conn->getConfig()->withOnNotice(new class($notice) implements NoticeHandlerInterface {
+            public function __construct(private &$notice)
+            {
+            }
+
+            public function __invoke(Notice $notice): void
+            {
+                $this->notice = $notice;
+            }
+        });
+        $conn = (new PgConnector())->connect($conf);
+
+        if ($conn->getParameterStatus('crdb_version') !== '') {
+            $this->markTestSkipped('Server does not support PL/PGSQL (https://github.com/cockroachdb/cockroach/issues/17511)');
+        }
+
+        $mrr = $conn->exec(<<<SQL
+do $$
+begin
+  raise notice 'Hello, world';
+end$$;
+SQL);
+
+        $mrr->close();
+
+        $this->ensureConnectionValid($conn);
+        $conn->close();
+
+        self::assertInstanceOf(Notice::class, $notice);
+        self::assertSame('Hello, world', $notice->message);
+    }
+
+    public function testOnNotification(): void
+    {
+        $notification = null;
+        $conf = $this->conn->getConfig()->withOnNotification(new class($notification) implements NotificationHandlerInterface {
+            public function __construct(private &$notification)
+            {
+            }
+
+            public function __invoke(Notification $notification): void
+            {
+                $this->notification = $notification;
+            }
+        });
+        $conn = (new PgConnector())->connect($conf);
+
+        if ($conn->getParameterStatus('crdb_version') !== '') {
+            $this->markTestSkipped('Server does not support LISTEN / NOTIFY (https://github.com/cockroachdb/cockroach/issues/41522)');
+        }
+
+        $conn->exec('LISTEN foo')->readAll();
+
+        // Send notification
+        $notifier = (new PgConnector())->connect($conf);
+        $notifier->exec("NOTIFY foo, 'bar'")->readAll();
+        $notifier->close();
+
+        $conn->exec('SELECT 1')->readAll();
+        $conn->close();
+
+        self::assertInstanceOf(Notification::class, $notification);
+        self::assertSame('bar', $notification->payload);
+
+        $this->ensureConnectionValid();
+    }
+
+    public function testWaitForNotification(): void
+    {
+        if ($this->conn->getParameterStatus('crdb_version') !== '') {
+            $this->markTestSkipped('Server does not support LISTEN / NOTIFY (https://github.com/cockroachdb/cockroach/issues/41522)');
+        }
+
+        $this->conn->exec('LISTEN foo')->readAll();
+
+        // Send notification
+        $notifier = (new PgConnector())->connect($this->conn->getConfig());
+        $notifier->exec("NOTIFY foo, 'bar'")->readAll();
+        $notifier->close();
+
+        $notification = $this->conn->waitForNotification(new TimeoutCancellation(1));
+        self::assertSame('bar', $notification->payload);
+
+        $this->ensureConnectionValid();
+    }
+
+    public function testWaitForNotificationCancelled(): void
+    {
+        if ($this->conn->getParameterStatus('crdb_version') !== '') {
+            $this->markTestSkipped('Server does not support LISTEN / NOTIFY (https://github.com/cockroachdb/cockroach/issues/41522)');
+        }
+
+        $this->expectException(CancelledException::class);
+
+        try {
+            $this->conn->waitForNotification(new TimeoutCancellation(0.005));
+        } finally {
+            $this->ensureConnectionValid();
+        }
+    }
+
+    public function testWaitForNotificationPreCancelled(): void
+    {
+        if ($this->conn->getParameterStatus('crdb_version') !== '') {
+            $this->markTestSkipped('Server does not support LISTEN / NOTIFY (https://github.com/cockroachdb/cockroach/issues/41522)');
+        }
+
+        $this->expectException(CancelledException::class);
+
+        $cancellation = new TimeoutCancellation(0.005);
+        delay(0.1);
+
+        $this->conn->waitForNotification($cancellation);
+    }
+
+    public function testCancelRequest(): void
+    {
+        if ($this->conn->getParameterStatus('crdb_version') !== '') {
+            $this->markTestSkipped('Server does not support query cancellation (https://github.com/cockroachdb/cockroach/issues/41335)');
+        }
+
+        $this->expectException(PgErrorException::class);
+        $this->expectExceptionMessage('ERROR: canceling statement due to user request (SQLSTATE 57014)');
+
+        $mrr = $this->conn->exec("select 'Hello, world', pg_sleep(2)");
+
+        delay(0.05);
+
+        $this->conn->cancelRequest();
+
+        while ($mrr->nextResult()) {}
+        $mrr->close();
+
+        $this->ensureConnectionValid();
+    }
+
+    public function testCloseWhenQueryInProgress(): void
+    {
+        $this->expectNotToPerformAssertions();
+
+        $this->conn->exec('select n from generate_series(1,10) n');
+        $this->conn->close();
+    }
 }
