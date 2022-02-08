@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PhpPg\PgConn\Tests;
 
 use Amp\Socket\EncryptableSocket;
+use Amp\TimeoutCancellation;
 use PhpPg\PgConn\Config\AfterConnectFuncInterface;
 use PhpPg\PgConn\Config\HostConfig;
 use PhpPg\PgConn\Config\ValidateConnect\ValidateConnectReadWrite;
@@ -38,7 +39,7 @@ class PgConnectorTest extends TestCase
 
         $config = parseConfig($connString);
         $connector = new PgConnector();
-        $connection = $connector->connect($config);
+        $connection = $connector->connect($config, new TimeoutCancellation(2));
         $connection->close();
     }
 
@@ -56,7 +57,7 @@ class PgConnectorTest extends TestCase
         $config = parseConfig($connString);
         $connector = new PgConnector();
 
-        $connection = $connector->connect($config);
+        $connection = $connector->connect($config, new TimeoutCancellation(2));
         $connection->close();
 
         $socket = $connection->getSocket();
@@ -92,7 +93,7 @@ class PgConnectorTest extends TestCase
         $connector = new PgConnector();
 
         try {
-            $connector->connect($config);
+            $connector->connect($config, new TimeoutCancellation(2));
         } catch (ConnectException $e) {
             $prev = $e->getPrevious();
 
@@ -110,7 +111,7 @@ class PgConnectorTest extends TestCase
 
         $this->expectException(ConnectException::class);
 
-        $connector->connect($config);
+        $connector->connect($config, new TimeoutCancellation(2));
     }
 
     public function testConnectWithRuntimeParams(): void
@@ -126,7 +127,7 @@ class PgConnectorTest extends TestCase
 
         $connector = new PgConnector();
 
-        $conn = $connector->connect($config);
+        $conn = $connector->connect($config, new TimeoutCancellation(2));
         $results = $conn->exec('show application_name; show search_path;')->readAll();
 
         self::assertSame('pg_test', $results[0]->rows[0][0]);
@@ -155,7 +156,7 @@ class PgConnectorTest extends TestCase
             );
 
         $connector = new PgConnector();
-        $connector->connect($config);
+        $connector->connect($config, new TimeoutCancellation(3));
     }
 
     public function testConnectWithValidateConnect(): void
@@ -185,7 +186,7 @@ class PgConnectorTest extends TestCase
         $config = $config->setHosts([$config->getHosts()[0], $config->getHosts()[0]]);
 
         $connector = new PgConnector();
-        $connector->connect($config);
+        $connector->connect($config, new TimeoutCancellation(2));
 
         self::assertSame(2, $counter);
     }
@@ -204,7 +205,7 @@ class PgConnectorTest extends TestCase
         $this->expectException(ConnectException::class);
 
         $connector = new PgConnector();
-        $connector->connect($config);
+        $connector->connect($config, new TimeoutCancellation(2));
     }
 
     public function testConnectAfterConnect(): void
@@ -223,7 +224,7 @@ class PgConnectorTest extends TestCase
             });
 
         $connector = new PgConnector();
-        $conn = $connector->connect($config);
+        $conn = $connector->connect($config, new TimeoutCancellation(2));
 
         $results = $conn->exec('show search_path')->readAll();
         self::assertSame('foobar', $results[0]->rows[0][0]);

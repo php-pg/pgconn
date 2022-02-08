@@ -30,14 +30,14 @@ class PgConnTest extends TestCase
             $this->markTestSkipped("Missing PG_TEST_CONN_STRING env var");
         }
 
-        $handler = new \Amp\Log\StreamHandler(\Amp\ByteStream\getStdout());
-        $formatter = new \Amp\Log\ConsoleFormatter(
-            format: "[%datetime%] %channel%.%level_name%: %message% %context%\r\n"
-        );
-        $handler->setFormatter($formatter);
-
-        $logger = new \Monolog\Logger('pg');
-        $logger->pushHandler($handler);
+//        $handler = new \Amp\Log\StreamHandler(\Amp\ByteStream\getStdout());
+//        $formatter = new \Amp\Log\ConsoleFormatter(
+//            format: "[%datetime%] %channel%.%level_name%: %message% %context%\r\n"
+//        );
+//        $handler->setFormatter($formatter);
+//
+//        $logger = new \Monolog\Logger('pg');
+//        $logger->pushHandler($handler);
 
         $config = parseConfig($connString);
 //        $config = $config->withLogger($logger);
