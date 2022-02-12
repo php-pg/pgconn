@@ -16,6 +16,8 @@ use PhpPg\PgConn\PgConn;
 use PhpPg\PgConn\PgConnector;
 use PHPUnit\Framework\TestCase;
 
+use Revolt\EventLoop;
+
 use function Amp\async;
 use function Amp\delay;
 use function PhpPg\PgConn\Config\Internal\parseConfig;
@@ -33,23 +35,39 @@ class PgConnTest extends TestCase
             $this->markTestSkipped("Missing PG_TEST_CONN_STRING env var");
         }
 
-        $handler = new \Amp\Log\StreamHandler(\Amp\ByteStream\getStdout());
-        $formatter = new \Amp\Log\ConsoleFormatter(
-            format: "[%datetime%] %channel%.%level_name%: %message% %context%\r\n"
-        );
-        $handler->setFormatter($formatter);
+//        $handler = new \Amp\Log\StreamHandler(\Amp\ByteStream\getStdout());
+//        $formatter = new \Amp\Log\ConsoleFormatter(
+//            format: "[%datetime%] %channel%.%level_name%: %message% %context%\r\n"
+//        );
+//        $handler->setFormatter($formatter);
 
-        $logger = new \Monolog\Logger('pg');
-        $logger->pushHandler($handler);
+//        $logger =/new \Monolog\Logger('pg');
+//        $logger->pushHandler($handler);
 
         $config = parseConfig($connString);
-        $config = $config->withLogger($logger);
+//        $config = $config->withLogger($logger);
         $this->conn = (new PgConnector())->connect($config);
     }
 
     protected function tearDown(): void
     {
         $this->conn->close();
+
+        $info = EventLoop::getInfo();
+
+        foreach ($info as $key => $values) {
+            foreach ($values as $name => $value) {
+                if ($value > 0) {
+                    var_dump("{$key}=>{$name} = {$value}");
+                }
+            }
+        }
+
+        try {
+            $suspension = EventLoop::getSuspension();
+            $suspension->throw(new \RuntimeException('Catch you up!!!'));
+        } catch (\Error) {
+        }
 
         parent::tearDown();
     }
@@ -75,13 +93,17 @@ class PgConnTest extends TestCase
 
     public function testPrepareSyntaxError(): void
     {
-        $this->expectException(PgErrorException::class);
+        $err = null;
 
         try {
             $this->conn->prepare('ps1', 'SYNTAX ERROR');
-        } finally {
-            $this->ensureConnectionValid();
+        } catch (PgErrorException $e) {
+            $err = $e;
         }
+
+        self::assertInstanceOf(PgErrorException::class, $err);
+
+        $this->ensureConnectionValid();
     }
 
     public function testPrepareCancelled(): void
