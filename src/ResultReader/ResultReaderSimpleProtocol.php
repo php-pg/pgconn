@@ -145,10 +145,9 @@ class ResultReaderSimpleProtocol implements ResultReaderInterface
         while (!$this->closed) {
             $msg = $this->receiveMessage();
 
-            switch ($msg::class) {
-                case DataRow::class:
-                    $this->rowValues = $msg->values;
-                    return true;
+            if ($msg::class === DataRow::class) {
+                $this->rowValues = $msg->values;
+                return true;
             }
         }
 
@@ -177,26 +176,16 @@ class ResultReaderSimpleProtocol implements ResultReaderInterface
             throw $e;
         }
 
-        switch ($msg::class) {
-            /**
-             * From: Postgres Protocol Flow (53.2.2. Simple Query)
-             *
-             * Processing of the query string is complete.
-             * A separate message is sent to indicate this because the query string might contain multiple SQL commands.
-             * (CommandComplete marks the end of processing one SQL command, not the whole string.)
-             */
-            case CommandComplete::class:
-                $this->closed = true;
-                $this->commandTag = new CommandTag($msg->commandTag);
-                break;
-
-            // TODO: Support portal suspended
-            /**
-             * If Execute terminates before completing the execution of a portal
-             * (due to reaching a nonzero result-row count), it will send a PortalSuspended message;
-             * the appearance of this message tells the frontend that another
-             * Execute should be issued against the same portal to complete the operation.
-             */
+        /**
+         * From: Postgres Protocol Flow (53.2.2. Simple Query)
+         *
+         * Processing of the query string is complete.
+         * A separate message is sent to indicate this because the query string might contain multiple SQL commands.
+         * (CommandComplete marks the end of processing one SQL command, not the whole string.)
+         */
+        if ($msg::class === CommandComplete::class) {
+            $this->closed = true;
+            $this->commandTag = new CommandTag($msg->commandTag);
         }
 
         return $msg;

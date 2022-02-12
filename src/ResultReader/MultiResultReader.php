@@ -203,7 +203,7 @@ class MultiResultReader
         }
 
         try {
-            $message = $this->conn->receiveMessage($this->cancellation);
+            $msg = $this->conn->receiveMessage($this->cancellation);
         } catch (PgErrorException $e) {
             $this->closed = true;
             $this->unsubscribeCancellation();
@@ -236,29 +236,17 @@ class MultiResultReader
         }
 
         /**
-         * From: Postgres Protocol Flow (53.2.3. Extended Query)
-         * The Describe message (portal variant) specifies the name of an existing portal
-         * (or an empty string for the unnamed portal).
-         * The response is a RowDescription message describing the rows that will be returned by executing the portal;
-         * or a NoData message if the portal does not contain a query that will return rows;
-         * or ErrorResponse if there is no such portal.
+         * From: Postgres Protocol Flow (53.2.2. Simple Query)
+         * Processing of the query string is complete.
+         * ReadyForQuery will always be sent, whether processing terminates successfully or with an error.
          */
-
-        switch ($message::class) {
-            /**
-             * Processing of the query string is complete.
-             * A separate message is sent to indicate this because the query string might contain multiple SQL commands.
-             * (CommandComplete marks the end of processing one SQL command, not the whole string.)
-             * ReadyForQuery will always be sent, whether processing terminates successfully or with an error.
-             */
-            case ReadyForQuery::class:
-                $this->closed = true;
-                $this->unsubscribeCancellation();
-                ($this->releaseConn)();
-                break;
+        if ($msg::class === ReadyForQuery::class) {
+            $this->closed = true;
+            $this->unsubscribeCancellation();
+            ($this->releaseConn)();
         }
 
-        return $message;
+        return $msg;
     }
 
     private function unsubscribeCancellation(): void
