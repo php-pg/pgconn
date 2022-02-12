@@ -86,6 +86,10 @@ class PgConnTest extends TestCase
 
     public function testPrepareCancelled(): void
     {
+        if ($this->conn->getParameterStatus('crdb_version') !== '') {
+            $this->markTestSkipped('Server does not support query cancellation (https://github.com/cockroachdb/cockroach/issues/41335)');
+        }
+
         // TODO: Test actually does nothing
         $cancellation = new TimeoutCancellation(0.0001);
 
@@ -226,6 +230,10 @@ SQL;
 
     public function testExecCancelled(): void
     {
+        if ($this->conn->getParameterStatus('crdb_version') !== '') {
+            $this->markTestSkipped('Server does not support query cancellation (https://github.com/cockroachdb/cockroach/issues/41335)');
+        }
+
         $this->expectException(PgErrorException::class);
         $this->expectExceptionMessage('ERROR: canceling statement due to user request (SQLSTATE 57014)');
 
@@ -353,6 +361,10 @@ SQL;
 
     public function testExecParamsCancelled(): void
     {
+        if ($this->conn->getParameterStatus('crdb_version') !== '') {
+            $this->markTestSkipped('Server does not support query cancellation (https://github.com/cockroachdb/cockroach/issues/41335)');
+        }
+
         $this->expectException(PgErrorException::class);
         $this->expectExceptionMessage('ERROR: canceling statement due to user request (SQLSTATE 57014)');
 
@@ -483,6 +495,10 @@ SQL;
 
     public function testExecPreparedCancelled(): void
     {
+        if ($this->conn->getParameterStatus('crdb_version') !== '') {
+            $this->markTestSkipped('Server does not support query cancellation (https://github.com/cockroachdb/cockroach/issues/41335)');
+        }
+
         $this->expectException(PgErrorException::class);
         $this->expectExceptionMessage('ERROR: canceling statement due to user request (SQLSTATE 57014)');
 
@@ -642,6 +658,10 @@ SQL);
     public function testWaitForNotificationCancelled(): void
     {
         if ($this->conn->getParameterStatus('crdb_version') !== '') {
+            $this->markTestSkipped('Server does not support query cancellation (https://github.com/cockroachdb/cockroach/issues/41335)');
+        }
+
+        if ($this->conn->getParameterStatus('crdb_version') !== '') {
             $this->markTestSkipped('Server does not support LISTEN / NOTIFY (https://github.com/cockroachdb/cockroach/issues/41522)');
         }
 
@@ -699,6 +719,10 @@ SQL;
 
     public function testCopyFromCancelled(): void
     {
+        if ($this->conn->getParameterStatus('crdb_version') !== '') {
+            $this->markTestSkipped('Server does not support query cancellation (https://github.com/cockroachdb/cockroach/issues/41335)');
+        }
+
         if ($this->conn->getParameterStatus('crdb_version') !== '') {
             $this->markTestSkipped('Server does not fully support COPY FROM (https://www.cockroachlabs.com/docs/v20.2/copy-from.html)');
         }
@@ -930,6 +954,10 @@ SQL;
 
     public function testCopyToCancelled(): void
     {
+        if ($this->conn->getParameterStatus('crdb_version') !== '') {
+            $this->markTestSkipped('Server does not support query cancellation (https://github.com/cockroachdb/cockroach/issues/41335)');
+        }
+
         if ($this->conn->getParameterStatus('crdb_version') !== '') {
             $this->markTestSkipped('Server does not support COPY TO');
         }
