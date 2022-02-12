@@ -4,13 +4,12 @@ declare(strict_types=1);
 
 namespace PhpPg\PgConn\ResultReader;
 
-use Amp\ByteStream\ClosedException;
-use Amp\Cancellation;
 use Amp\CancelledException;
+use PhpPg\PgConn\CommandTag;
+use PhpPg\PgConn\Exception\ConnectionClosedException;
 use PhpPg\PgConn\Exception\PgErrorException;
 use PhpPg\PgProto3\Messages\BackendMessageInterface;
 use PhpPg\PgProto3\Messages\CommandComplete;
-use PhpPg\PgProto3\Messages\CommandTag;
 use PhpPg\PgProto3\Messages\DataRow;
 use PhpPg\PgProto3\Messages\FieldDescription;
 
@@ -37,7 +36,6 @@ class ResultReaderSimpleProtocol implements ResultReaderInterface
         private MultiResultReader $mrr,
         private ?array $fieldDescriptions = null,
         private ?CommandTag $commandTag = null,
-        private ?Cancellation $cancellation = null,
     ) {
         if ($this->fieldDescriptions === null && $this->commandTag === null) {
             throw new \LogicException('fieldDescriptions and commandTag could not be null');
@@ -58,6 +56,11 @@ class ResultReaderSimpleProtocol implements ResultReaderInterface
         }
     }
 
+    /**
+     * @return void
+     *
+     * @throws ConnectionClosedException
+     */
     public function close(): void
     {
         if ($this->closed) {
@@ -101,7 +104,7 @@ class ResultReaderSimpleProtocol implements ResultReaderInterface
      *
      * @return Result
      *
-     * @throws ClosedException
+     * @throws ConnectionClosedException
      * @throws CancelledException
      * @throws PgErrorException
      */
@@ -133,14 +136,14 @@ class ResultReaderSimpleProtocol implements ResultReaderInterface
      * Advances the ResultReader to the next row.
      * @return bool true if a row is available
      *
-     * @throws ClosedException
+     * @throws ConnectionClosedException
      * @throws CancelledException
      * @throws PgErrorException
      */
     public function nextRow(): bool
     {
         while (!$this->closed) {
-            $msg = $this->receiveMessage($this->cancellation);
+            $msg = $this->receiveMessage();
 
             switch ($msg::class) {
                 case DataRow::class:
@@ -155,21 +158,22 @@ class ResultReaderSimpleProtocol implements ResultReaderInterface
     /**
      * @return BackendMessageInterface
      *
-     * @throws ClosedException
      * @throws CancelledException
+     * @throws ConnectionClosedException
      * @throws PgErrorException
      */
-    private function receiveMessage(?Cancellation $cancellation = null): BackendMessageInterface
+    private function receiveMessage(): BackendMessageInterface
     {
         if ($this->closed) {
             throw new \LogicException('ResultReader is closed');
         }
 
         try {
-            $msg = $this->mrr->receiveMessage($cancellation);
+            $msg = $this->mrr->receiveMessage();
         } catch (\Throwable $e) {
             $this->closed = true;
 
+            // MultiResultReader already handled everything for us
             throw $e;
         }
 
@@ -183,7 +187,7 @@ class ResultReaderSimpleProtocol implements ResultReaderInterface
              */
             case CommandComplete::class:
                 $this->closed = true;
-                $this->commandTag = $msg->commandTag;
+                $this->commandTag = new CommandTag($msg->commandTag);
                 break;
 
             // TODO: Support portal suspended
@@ -198,16 +202,22 @@ class ResultReaderSimpleProtocol implements ResultReaderInterface
         return $msg;
     }
 
+    /**
+     * @return void
+     *
+     * @throws ConnectionClosedException
+     */
     private function restoreConnectionState(): void
     {
         while (true) {
             try {
-                if ($this->mrr->receiveMessage($this->cancellation)::class === CommandComplete::class) {
+                if ($this->mrr->receiveMessage()::class === CommandComplete::class) {
                     break;
                 }
-            } catch (\Throwable) {
-                // Stop on any error, any further connection state restore logic will do the MultiResultReader
+            } catch (PgErrorException) {
                 break;
+            } catch (CancelledException) {
+                continue;
             }
         }
     }

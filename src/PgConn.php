@@ -5,18 +5,22 @@ declare(strict_types=1);
 namespace PhpPg\PgConn;
 
 use Amp\ByteStream\ClosedException;
+use Amp\ByteStream\ReadableStream;
+use Amp\ByteStream\WritableStream;
 use Amp\Cancellation;
 use Amp\CancelledException;
 use Amp\Socket\Socket;
 use Amp\TimeoutCancellation;
 use PhpPg\PgConn\Config\Config;
 use PhpPg\PgConn\Config\HostConfig;
+use PhpPg\PgConn\Exception\ConnectionClosedException;
 use PhpPg\PgConn\Exception\PgErrorException;
 use PhpPg\PgConn\ResultReader\MultiResultReader;
 use PhpPg\PgConn\ResultReader\ResultReaderExtendedProtocol;
-use PhpPg\PgProto3\Exception\ProtoException;
 use PhpPg\PgProto3\FrontendInterface;
 use PhpPg\PgProto3\Messages;
+
+use function Amp\async;
 
 class PgConn
 {
@@ -136,7 +140,8 @@ class PgConn
      * @param Cancellation|null $cancellation
      * @return MultiResultReader
      *
-     * @throws ClosedException
+     * @throws ConnectionClosedException
+     * @throws CancelledException
      */
     public function exec(string $sql, ?Cancellation $cancellation = null): MultiResultReader
     {
@@ -144,19 +149,13 @@ class PgConn
 
         $this->lock();
 
-        try {
-            $this->frontend->send(new Messages\Query(query: $sql));
-        } catch (\Throwable $e) {
-            $this->close();
-
-            throw $e;
-        }
+        $this->safeSend(new Messages\Query(query: $sql));
 
         $cancelCbId = $cancellation?->subscribe(function () {
             $this->cancelRequest(new TimeoutCancellation(10));
         });
 
-        return new MultiResultReader($this, $this->unlock(...), $cancellation, $cancelCbId ?? null);
+        return new MultiResultReader($this, $this->unlock(...), $cancellation, $cancelCbId);
     }
 
     /**
@@ -168,9 +167,9 @@ class PgConn
      * @param Cancellation|null $cancellation
      * @return StatementDescription
      *
-     * @throws ClosedException
      * @throws PgErrorException
-     * @throws ProtoException
+     * @throws ConnectionClosedException
+     * @throws CancelledException
      */
     public function prepare(
         string $name,
@@ -187,13 +186,7 @@ class PgConn
         $msgs[] = new Messages\Describe(objectType: 'S', name: $name);
         $msgs[] = new Messages\Sync();
 
-        try {
-            $this->frontend->sendBulk($msgs);
-        } catch (\Throwable $e) {
-            $this->close();
-
-            throw $e;
-        }
+        $this->safeSendBulk($msgs);
 
         $fetchedParamOIDs = [];
         $fetchedFields = [];
@@ -207,10 +200,10 @@ class PgConn
                 try {
                     $msg = $this->receiveMessage($cancellation);
                 } catch (PgErrorException $e) {
-                    if ($e->pgError->severity === 'FATAL') {
-                        $cancellation?->unsubscribe($cancelCbId ?? '');
-                    } else {
-                        $this->restoreConnectionState($cancellation);
+                    $cancellation?->unsubscribe($cancelCbId ?? '');
+
+                    if ($e->pgError->severity !== 'FATAL') {
+                        $this->restoreConnectionState();
                     }
 
                     throw $e;
@@ -261,8 +254,10 @@ class PgConn
      *
      * @return ResultReaderExtendedProtocol
      *
-     * @throws ClosedException
+     * @throws PgErrorException
+     * @throws ConnectionClosedException
      * @throws \InvalidArgumentException
+     * @throws CancelledException
      */
     public function execPrepared(
         string $stmtName,
@@ -288,13 +283,7 @@ class PgConn
         $msgs[] = new Messages\Execute();
         $msgs[] = new Messages\Sync();
 
-        try {
-            $this->frontend->sendBulk($msgs);
-        } catch (\Throwable $e) {
-            $this->close();
-
-            throw $e;
-        }
+        $this->safeSendBulk($msgs);
 
         $cancelCbId = $cancellation?->subscribe(function () {
             $this->cancelRequest(new TimeoutCancellation(10));
@@ -334,8 +323,10 @@ class PgConn
      *
      * @return ResultReaderExtendedProtocol
      *
-     * @throws ClosedException
+     * @throws PgErrorException
+     * @throws ConnectionClosedException
      * @throws \InvalidArgumentException
+     * @throws CancelledException
      */
     public function execParams(
         string $sql,
@@ -362,13 +353,7 @@ class PgConn
         $msgs[] = new Messages\Execute();
         $msgs[] = new Messages\Sync();
 
-        try {
-            $this->frontend->sendBulk($msgs);
-        } catch (\Throwable $e) {
-            $this->close();
-
-            throw $e;
-        }
+        $this->safeSendBulk($msgs);
 
         $cancelCbId = $cancellation?->subscribe(function () {
             $this->cancelRequest(new TimeoutCancellation(10));
@@ -388,13 +373,256 @@ class PgConn
     }
 
     /**
+     * CopyFrom executes the copy command sql and copies all of r to the PostgreSQL server.
+     *
+     * @param string $sql
+     * @param ReadableStream $stream
+     * @param Cancellation|null $cancellation
+     * @return CommandTag
+     *
+     * @throws PgErrorException
+     * @throws ConnectionClosedException
+     * @throws CancelledException
+     */
+    public function copyFrom(string $sql, ReadableStream $stream, ?Cancellation $cancellation = null): CommandTag
+    {
+        $cancellation?->throwIfRequested();
+
+        $this->lock();
+
+        $this->safeSend(new Messages\Query($sql));
+
+        $cancelCbId = $cancellation?->subscribe(function () {
+            $this->cancelRequest(new TimeoutCancellation(10));
+        });
+
+        $commandTag = new CommandTag('');
+
+        // Read until copy in response
+        while (true) {
+            try {
+                $msg = $this->receiveMessage($cancellation);
+            } catch (CancelledException) {
+                $cancellation = null;
+                $cancellation?->unsubscribe($cancelCbId ?? '');
+
+                continue;
+            } catch (PgErrorException $e) {
+                $cancellation?->unsubscribe($cancelCbId ?? '');
+
+                if ($e->pgError->severity !== 'FATAL') {
+                    // Finalize reading on Postgres error (put connection back to a valid state)
+                    $this->restoreConnectionState();
+                }
+
+                $this->unlock();
+
+                throw $e;
+            } catch (\Throwable $e) {
+                $cancellation?->unsubscribe($cancelCbId ?? '');
+                $this->unlock();
+
+                throw $e;
+            }
+
+            if ($msg::class === Messages\CopyInResponse::class) {
+                $cancellation?->unsubscribe($cancelCbId ?? '');
+                break;
+            }
+
+            if ($msg::class === Messages\CommandComplete::class) {
+                $commandTag = new CommandTag($msg->commandTag);
+                continue;
+            }
+
+            if ($msg::class === Messages\ReadyForQuery::class) {
+                $cancellation?->unsubscribe($cancelCbId ?? '');
+
+                $this->unlock();
+
+                return $commandTag;
+            }
+        }
+
+        $cancelCbId = $cancellation?->subscribe(function (CancelledException $e) {
+            $this->frontend->send(new Messages\CopyFail($e->getMessage()));
+        });
+
+        /** @var \Throwable|null $copyErr */
+        $copyErr = null;
+
+        // Send CopyDate in background
+        $copyFeature = async(function () use ($stream, &$copyErr, &$cancellation) {
+            while ($copyErr === null && null !== ($data = $stream->read($cancellation))) {
+                $this->safeSend(new Messages\CopyData($data));
+            }
+
+            if ($copyErr === null) {
+                // End of stream
+                $this->safeSend(new Messages\CopyDone());
+            }
+        })->catch(function (\Throwable $e) use (&$cancellation, $cancelCbId) {
+            if ($e instanceof CancelledException) {
+                // CopyFail message is already sent from cancellation subscription
+                return;
+            }
+
+            $cancellation?->unsubscribe($cancelCbId ?? '');
+            $cancellation = null;
+
+            $this->safeSend(new Messages\CopyFail($e->getMessage()));
+        });
+        $copyFeature->ignore();
+
+        while (true) {
+            try {
+                $msg = $this->receiveMessage();
+            } catch (PgErrorException $e) {
+                $copyErr = $e;
+                $cancellation?->unsubscribe($cancelCbId ?? '');
+
+                if ($e->pgError->severity !== 'FATAL') {
+                    $this->restoreConnectionState();
+                }
+
+                $this->unlock();
+
+                throw $e;
+            } catch (CancelledException $e) {
+                $copyErr = $e;
+                $cancellation?->unsubscribe($cancelCbId ?? '');
+                $cancellation = null;
+
+                continue;
+            } catch (\Throwable $e) {
+                $copyErr = $e;
+                $cancellation?->unsubscribe($cancelCbId ?? '');
+                $this->unlock();
+
+                throw $e;
+            }
+
+            if ($msg::class === Messages\CommandComplete::class) {
+                $commandTag = new CommandTag($msg->commandTag);
+                continue;
+            }
+
+            if ($msg::class === Messages\ReadyForQuery::class) {
+                break;
+            }
+        }
+
+        $this->unlock();
+
+        return $commandTag;
+    }
+
+    /**
+     * CopyTo executes the copy command sql and copies the results to writable stream.
+     *
+     * @param string $sql
+     * @param WritableStream $stream
+     * @param Cancellation|null $cancellation
+     * @return CommandTag
+     *
+     * @throws PgErrorException
+     * @throws ConnectionClosedException
+     * @throws CancelledException
+     */
+    public function copyTo(string $sql, WritableStream $stream, ?Cancellation $cancellation = null): CommandTag
+    {
+        $cancellation?->throwIfRequested();
+
+        $this->lock();
+
+        $this->safeSend(new Messages\Query($sql));
+
+        $cancelCbId = $cancellation?->subscribe(function () {
+            $this->cancelRequest(new TimeoutCancellation(10));
+        });
+
+        $commandTag = new CommandTag('');
+        $err = null;
+
+        while (true) {
+            try {
+                $msg = $this->receiveMessage($cancellation);
+            } catch (CancelledException) {
+                $cancellation?->unsubscribe($cancelCbId ?? '');
+                $cancellation = null;
+
+                continue;
+            } catch (PgErrorException $e) {
+                $cancellation?->unsubscribe($cancelCbId ?? '');
+
+                if ($e->pgError->severity !== 'FATAL') {
+                    // Finalize reading on Postgres error (put connection back to a valid state)
+                    $this->restoreConnectionState();
+                }
+
+                $this->unlock();
+
+                // err is not null when stream write fails
+                if ($err !== null) {
+                    throw $err;
+                }
+
+                throw $e;
+            } catch (\Throwable $e) {
+                $cancellation?->unsubscribe($cancelCbId ?? '');
+
+                $this->unlock();
+
+                throw $e;
+            }
+
+            if ($msg::class === Messages\CopyData::class) {
+                if ($err !== null) {
+                    // Do not write data to the stream if it once failed
+                    continue;
+                }
+
+                try {
+                    $stream->write($msg->data);
+                } catch (\Throwable $e) {
+                    $err = $e;
+                    $cancellation?->unsubscribe($cancelCbId ?? '');
+
+                    // Send cancel request on stream write error
+                    async(function () {
+                        $this->cancelRequest(new TimeoutCancellation(10));
+                    })->ignore();
+                }
+
+                continue;
+            }
+
+            if ($msg::class === Messages\CommandComplete::class) {
+                $commandTag = new CommandTag($msg->commandTag);
+                continue;
+            }
+
+            if ($msg::class === Messages\ReadyForQuery::class) {
+                $cancellation?->unsubscribe($cancelCbId ?? '');
+
+                $this->unlock();
+
+                if ($err !== null) {
+                    throw $err;
+                }
+
+                return $commandTag;
+            }
+        }
+    }
+
+    /**
      * @param Cancellation|null $cancellation
      * @return Notification
      *
      * @throws CancelledException
-     * @throws ClosedException
      * @throws PgErrorException
-     * @throws ProtoException
+     * @throws ConnectionClosedException
      */
     public function waitForNotification(?Cancellation $cancellation = null): Notification
     {
@@ -442,9 +670,8 @@ class PgConn
      * @return Messages\BackendMessageInterface
      *
      * @throws CancelledException
-     * @throws ClosedException
      * @throws PgErrorException
-     * @throws ProtoException
+     * @throws ConnectionClosedException
      *
      * @internal Do not call in external code, this is low level method to accept Postgres Protocol message.
      * Calling this method in external code may break Postgres connection state.
@@ -453,7 +680,9 @@ class PgConn
     {
         try {
             $msg = $this->frontend->receive($cancellation);
-        } catch (ClosedException | ProtoException $e) {
+        } catch (CancelledException $e) {
+            throw $e;
+        } catch (\Throwable $e) {
             /**
              * From: Postgres Protocol Flow (51.2.8. Termination)
              * Closing the connection is also advisable if an unrecognizable message type is received,
@@ -461,7 +690,7 @@ class PgConn
              */
             $this->close();
 
-            throw $e;
+            throw new ConnectionClosedException($e);
         }
 
         switch ($msg::class) {
@@ -502,20 +731,18 @@ class PgConn
     /**
      * Restore connection after NON-FATAL error
      *
-     * @param Cancellation|null $cancellation
      * @return void
      *
-     * @throws ClosedException
-     * @throws ProtoException
+     * @throws ConnectionClosedException
      *
      * @internal Do not call in external code, this is low level method to accept Postgres Protocol message.
      * Calling this method in external code may break Postgres connection state.
      */
-    public function restoreConnectionState(?Cancellation $cancellation = null): void
+    public function restoreConnectionState(): void
     {
         while (true) {
             try {
-                if ($this->receiveMessage($cancellation)::class === Messages\ReadyForQuery::class) {
+                if ($this->receiveMessage()::class === Messages\ReadyForQuery::class) {
                     break;
                 }
             } catch (PgErrorException $e) {
@@ -527,9 +754,43 @@ class PgConn
                 // don't stop on Postgres error exception
                 continue;
             } catch (CancelledException) {
-                $cancellation = null;
+                // impossible case, but handle it to prevent unwanted behavior
                 continue;
             }
+        }
+    }
+
+    /**
+     * @param Messages\FrontendMessageInterface $msg
+     * @return void
+     * @throws ConnectionClosedException
+     */
+    private function safeSend(Messages\FrontendMessageInterface $msg): void
+    {
+        try {
+            $this->frontend->send($msg);
+        } catch (\Throwable $e) {
+            // Any write errors are fatal
+            $this->close();
+
+            throw new ConnectionClosedException($e);
+        }
+    }
+
+    /**
+     * @param array<Messages\FrontendMessageInterface> $msgs
+     * @return void
+     * @throws ConnectionClosedException
+     */
+    private function safeSendBulk(array $msgs): void
+    {
+        try {
+            $this->frontend->sendBulk($msgs);
+        } catch (\Throwable $e) {
+            // Any write errors are fatal
+            $this->close();
+
+            throw new ConnectionClosedException($e);
         }
     }
 

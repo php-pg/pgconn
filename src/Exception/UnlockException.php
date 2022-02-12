@@ -6,7 +6,7 @@ namespace PhpPg\PgConn\Exception;
 
 use PhpPg\PgConn\PgConnStatus;
 
-class UnlockException extends \Exception
+class UnlockException extends ConnectionException
 {
     private PgConnStatus $status;
 

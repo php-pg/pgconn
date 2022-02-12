@@ -101,103 +101,156 @@ Methods:
 * `PgConn::getParameterStatus(string $paramName): string` - Get current session runtime parameter
 * `PgConn::cancelRequest` - Cancel running in-progress request (might not have effect, see `Cancelling API calls` section)
 * `PgConn::exec` - Execute query using simple protocol (multiple queries can be specified at once).
-```php
-/** @var \PhpPg\PgConn\PgConn $conn */
-$sql = "SELECT 'Hello World' AS msg, 322 AS num; SELECT * FROM table; UPDATE table SET idx = idx + 1";
-
-/**
-* If the query contains a syntax error or contains invalid data, no exception will be thrown,
-* an exception will be thrown when the results are received.
-*/
-$mrr = $conn->exec($sql);
-
-// Fetch all results at once
-$results = $mrr->readAll();
-
-$results[0]; // query 1 results
-$results[1]; // query 2 results
-$results[2]; // query 3 results
-
-$results[0]->getCommandTag(); // query 1 execution result (e.g. SELECT 1)
-$rows = $results[0]->getRows(); // query 1 returned rows (multidimensional array)
-$rows[0]; // query 1 row 1
-$rows[0][0] // query 1 row 1 column 1
-$rows[0][0] // query 1 row 1 column 2
-
-$results[0]->getFieldDescriptions(); // query 1 returned rows format information (binary/text, data type, column name, etc)
-
-// Fetch results in iterative way
-while ($mrr->nextResult()) {
-    $rr = $mrr->getResultReader();
-    $fieldDescriptions = $rr->getFieldDescriptions()
-    
-    while ($rr->nextRow()) {
-        $result = $rr->getResult();
-
-        $rows = $result->getRows();
-        foreach ($rows as $rowIdx => $row) {
-            foreach ($row as $colIdx => $colValue) {
-                // Do something with returned data
-            }
-        }
-    }
-    
-    $commandTag = $rr->getCommandTag();
-}
-```
+  <details>
+    <summary>See example</summary>
+  
+  ```php
+  /** @var \PhpPg\PgConn\PgConn $conn */
+  $sql = "SELECT 'Hello World' AS msg, 322 AS num; SELECT * FROM table; UPDATE table SET idx = idx + 1";
+  
+  /**
+  * If the query contains a syntax error or contains invalid data, no exception will be thrown,
+  * an exception will be thrown when the results are received.
+  */
+  $mrr = $conn->exec($sql);
+  
+  // Fetch all results at once
+  $results = $mrr->readAll();
+  
+  $results[0]; // query 1 results
+  $results[1]; // query 2 results
+  $results[2]; // query 3 results
+  
+  $results[0]->getCommandTag(); // query 1 execution result (e.g. SELECT 1)
+  $rows = $results[0]->getRows(); // query 1 returned rows (multidimensional array)
+  $rows[0]; // query 1 row 1
+  $rows[0][0] // query 1 row 1 column 1
+  $rows[0][0] // query 1 row 1 column 2
+  
+  $results[0]->getFieldDescriptions(); // query 1 returned rows format information (binary/text, data type, column name, etc)
+  
+  // Fetch results in iterative way
+  while ($mrr->nextResult()) {
+      $rr = $mrr->getResultReader();
+      $fieldDescriptions = $rr->getFieldDescriptions()
+      
+      while ($rr->nextRow()) {
+          $result = $rr->getResult();
+  
+          $rows = $result->getRows();
+          foreach ($rows as $rowIdx => $row) {
+              foreach ($row as $colIdx => $colValue) {
+                  // Do something with returned data
+              }
+          }
+      }
+      
+      $commandTag = $rr->getCommandTag();
+  }
+  ```
+  </details>
 
 * `PgConn::execParams` - Execute query using extended protocol (parameter bindings allowed), multiple queries are not allowed
-```php
-/** @var \PhpPg\PgConn\PgConn $conn */
-$rr = $conn->execParams(
-    sql: 'SELECT $1::int, $2::text',
-    paramValues: ['100', 'Hello world'],
-    // param formats (binary/text)
-    paramFormats: [],
-    // param data types
-    paramOIDs: [],
-    // return rows format (binary/text)
-    resultFormats: [],
-);
-
-$result = $rr->getResult();
-
-$result->getFieldDescriptions(); // returned rows format information (binary/text, data type, column name, etc)
-$result->getRows(); // returned rows
-$result->getCommandTag(); // command execution result
-```
+  <details>
+    <summary>See example</summary>
+  
+  ```php
+  /** @var \PhpPg\PgConn\PgConn $conn */
+  $rr = $conn->execParams(
+      sql: 'SELECT $1::int, $2::text',
+      paramValues: ['100', 'Hello world'],
+      // param formats (binary/text)
+      paramFormats: [],
+      // param data types
+      paramOIDs: [],
+      // return rows format (binary/text)
+      resultFormats: [],
+  );
+  
+  $result = $rr->getResult();
+  
+  $result->getFieldDescriptions(); // returned rows format information (binary/text, data type, column name, etc)
+  $result->getRows(); // returned rows
+  $result->getCommandTag(); // command execution result
+  ```
+  </details>
 
 * `PgConn::prepare` - Prepare statement
-```php
-/** @var \PhpPg\PgConn\PgConn $conn */
-$stmtDesc = $conn->prepare(
-    name: 'my_stmt_1',
-    sql: "INSERT INTO my_table (col1, col2) VALUES ($1::int, $2::text)"
-);
-$stmtDesc->name; // prepared statement name
-$stmtDesc->fields; // prepared statement return rows format description
-$stmtDesc->paramOIDs; // prepared statement bind parameter types
-$stmtDesc->sql; // prepared statement query
-```
+  <details>
+    <summary>See example</summary>
+  
+    ```php
+    /** @var \PhpPg\PgConn\PgConn $conn */
+    $stmtDesc = $conn->prepare(
+        name: 'my_stmt_1',
+        sql: "INSERT INTO my_table (col1, col2) VALUES ($1::int, $2::text)"
+    );
+    $stmtDesc->name; // prepared statement name
+    $stmtDesc->fields; // prepared statement return rows format description
+    $stmtDesc->paramOIDs; // prepared statement bind parameter types
+    $stmtDesc->sql; // prepared statement query
+    ```
+  </details>
 
 * `PgConn:execPrepared` - Execute prepared statement
-```php
-/** @var \PhpPg\PgConn\PgConn $conn */
-$rr = $conn->execPrepared(
-    stmtName: 'my_stmt_1',
-    paramValues: ['100', 'Hello World'],
-    // parameter formats (1 - text; 0 - binary
-    // One item per each paramValue or one item for all paramValues
-    paramFormats: [],
-    // desired format of returned rows, such as paramFormats
-    resultFormats: [],
-);
-$result = $rr->getResult();
+  <details>
+    <summary>See example</summary>
+  
+  ```php
+  /** @var \PhpPg\PgConn\PgConn $conn */
+  $rr = $conn->execPrepared(
+      stmtName: 'my_stmt_1',
+      paramValues: ['100', 'Hello World'],
+      // parameter formats (1 - text; 0 - binary
+      // One item per each paramValue or one item for all paramValues
+      paramFormats: [],
+      // desired format of returned rows, such as paramFormats
+      resultFormats: [],
+  );
+  $result = $rr->getResult();
+  
+  $result->getFieldDescriptions(); // returned rows format information (binary/text, data type, column name, etc)
+  $result->getRows(); // returned rows
+  $result->getCommandTag(); // command execution result
+  ```
+  </details>
 
-$result->getFieldDescriptions(); // returned rows format information (binary/text, data type, column name, etc)
-$result->getRows(); // returned rows
-$result->getCommandTag(); // command execution result
-```
+* `PgConn::copyFrom` - Copy data from readable stream to the PostgreSQL server
+  <details>
+    <summary>See example</summary>
+  
+  ```php
+  /** @var \PhpPg\PgConn\PgConn $conn */
+  $genData = static function (): \Generator {
+      for ($i = 0; $i < 1000; $i++) {
+          yield "{$i}, \"foo {$i} bar\"\n";
+      }
+  };
+  $stream = new \Amp\ByteStream\ReadableIterableStream($genData());
+  
+  $ct = $conn->copyFrom('COPY foo FROM STDIN WITH (FORMAT csv)', $stream);
+  echo "Rows affected: {$ct->rowsAffected()}\n";
+  ```
+  </details>
+
+* `PgConn::copyTo` - Copy data from the PostgreSQL server to writable stream
+  <details>
+    <summary>See example</summary>
+  
+  ```php
+  /** @var \PhpPg\PgConn\PgConn $conn */
+  $stream = new \Amp\ByteStream\WritableIterableStream(0);
+  
+  \Amp\async(static function () use ($stream) {
+  foreach ($stream->getIterator() as $row) {
+  // Process row copied from postgres
+  }
+  });
+  
+  $ct = $conn->copyTo('COPY foo TO STDOUT', $stream);
+  echo "Rows affected: {$ct->rowsAffected()}\n";
+  ```
+  </details>
 
 ## Cancelling API calls
 Any of API calls can be canceled using AMPHP cancellation objects. \

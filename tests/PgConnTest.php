@@ -2,6 +2,8 @@
 
 namespace PhpPg\PgConn\Tests;
 
+use Amp\ByteStream\ReadableIterableStream;
+use Amp\ByteStream\WritableIterableStream;
 use Amp\CancelledException;
 use Amp\TimeoutCancellation;
 use PhpPg\PgConn\Config\NoticeHandlerInterface;
@@ -14,6 +16,7 @@ use PhpPg\PgConn\PgConn;
 use PhpPg\PgConn\PgConnector;
 use PHPUnit\Framework\TestCase;
 
+use function Amp\async;
 use function Amp\delay;
 use function PhpPg\PgConn\Config\Internal\parseConfig;
 
@@ -30,14 +33,14 @@ class PgConnTest extends TestCase
             $this->markTestSkipped("Missing PG_TEST_CONN_STRING env var");
         }
 
-//        $handler = new \Amp\Log\StreamHandler(\Amp\ByteStream\getStdout());
-//        $formatter = new \Amp\Log\ConsoleFormatter(
-//            format: "[%datetime%] %channel%.%level_name%: %message% %context%\r\n"
-//        );
-//        $handler->setFormatter($formatter);
-//
-//        $logger = new \Monolog\Logger('pg');
-//        $logger->pushHandler($handler);
+        $handler = new \Amp\Log\StreamHandler(\Amp\ByteStream\getStdout());
+        $formatter = new \Amp\Log\ConsoleFormatter(
+            format: "[%datetime%] %channel%.%level_name%: %message% %context%\r\n"
+        );
+        $handler->setFormatter($formatter);
+
+        $logger = new \Monolog\Logger('pg');
+        $logger->pushHandler($handler);
 
         $config = parseConfig($connString);
 //        $config = $config->withLogger($logger);
@@ -427,6 +430,7 @@ SQL;
         $result = $rr->getResult();
 
         self::assertCount(\count($params), $result->getRows());
+        self::assertSame($args, \array_column($result->getRows(), 0));
 
         \ini_set('memory_limit', $oldLimit);
         $this->ensureConnectionValid();
@@ -664,6 +668,317 @@ SQL);
         $this->conn->waitForNotification($cancellation);
     }
 
+    public function testCopyFrom(): void
+    {
+        if ($this->conn->getParameterStatus('crdb_version') !== '') {
+            $this->markTestSkipped('Server does not fully support COPY FROM (https://www.cockroachlabs.com/docs/v20.2/copy-from.html)');
+        }
+
+        $sql = <<<SQL
+create temporary table foo(
+    a int4,
+    b varchar
+)
+SQL;
+
+        $this->conn->exec($sql)->readAll();
+
+        $genData = static function (): \Generator {
+            for ($i = 0; $i < 1000; $i++) {
+                yield "{$i}, \"foo {$i} bar\"\n";
+            }
+        };
+        $stream = new ReadableIterableStream($genData());
+
+        $ct = $this->conn->copyFrom('COPY foo FROM STDIN WITH (FORMAT csv)', $stream);
+        self::assertSame(1000, $ct->rowsAffected());
+
+        $result = $this->conn->execParams('SELECT * FROM foo')->getResult();
+        self::assertCount(1000, $result->getRows());
+    }
+
+    public function testCopyFromCancelled(): void
+    {
+        if ($this->conn->getParameterStatus('crdb_version') !== '') {
+            $this->markTestSkipped('Server does not fully support COPY FROM (https://www.cockroachlabs.com/docs/v20.2/copy-from.html)');
+        }
+
+        $sql = <<<SQL
+create temporary table foo(
+    a int4,
+    b varchar
+)
+SQL;
+
+        $this->conn->exec($sql)->readAll();
+
+        $genData = static function (): \Generator {
+            for ($i = 0; $i < 1000000; $i++) {
+                yield "{$i}, \"foo {$i} bar\"\n";
+
+                delay(0.001);
+            }
+        };
+        $stream = new ReadableIterableStream($genData());
+
+        $this->expectException(PgErrorException::class);
+        $this->expectExceptionMessage('ERROR: COPY from stdin failed: The operation was cancelled (SQLSTATE 57014)');
+
+        try {
+            $this->conn->copyFrom('COPY foo FROM STDIN WITH (FORMAT csv)', $stream, new TimeoutCancellation(0.1));
+        } finally {
+            $this->ensureConnectionValid();
+        }
+    }
+
+    public function testCopyFromPreCancelled(): void
+    {
+        if ($this->conn->getParameterStatus('crdb_version') !== '') {
+            $this->markTestSkipped('Server does not fully support COPY FROM (https://www.cockroachlabs.com/docs/v20.2/copy-from.html)');
+        }
+
+        $sql = <<<SQL
+create temporary table foo(
+    a int4,
+    b varchar
+)
+SQL;
+
+        $this->conn->exec($sql)->readAll();
+
+        $genData = static fn(): \Generator => yield "\n";
+        $stream = new ReadableIterableStream($genData());
+
+        $this->expectException(CancelledException::class);
+
+        $cancellation = new TimeoutCancellation(0.001);
+        delay(0.01);
+
+        try {
+            $this->conn->copyFrom('COPY foo FROM STDIN WITH (FORMAT csv)', $stream, $cancellation);
+        } finally {
+            $this->ensureConnectionValid();
+        }
+    }
+
+    public function testCopyFromQuerySyntaxError(): void
+    {
+        if ($this->conn->getParameterStatus('crdb_version') !== '') {
+            $this->markTestSkipped('Server does not fully support COPY FROM (https://www.cockroachlabs.com/docs/v20.2/copy-from.html)');
+        }
+
+        $sql = <<<SQL
+create temporary table foo(
+    a int4,
+    b varchar
+)
+SQL;
+
+        $this->conn->exec($sql)->readAll();
+
+        $genData = static fn(): \Generator => yield "\n";
+        $stream = new ReadableIterableStream($genData());
+
+        $this->expectException(PgErrorException::class);
+        $this->expectExceptionMessage('ERROR: syntax error at or near "CROPY" (SQLSTATE 42601)');
+
+        try {
+            $this->conn->copyFrom('CROPY fooooo TO STDOUT', $stream);
+        } finally {
+            $this->ensureConnectionValid();
+        }
+    }
+
+    public function testCopyFromNoTableError(): void
+    {
+        if ($this->conn->getParameterStatus('crdb_version') !== '') {
+            $this->markTestSkipped('Server does not fully support COPY FROM (https://www.cockroachlabs.com/docs/v20.2/copy-from.html)');
+        }
+
+        $sql = <<<SQL
+create temporary table foo(
+    a int4,
+    b varchar
+)
+SQL;
+
+        $this->conn->exec($sql)->readAll();
+
+        $genData = static fn(): \Generator => yield "\n";
+        $stream = new ReadableIterableStream($genData());
+
+        $ct = $this->conn->copyFrom('COPY foo TO stdout', $stream);
+        self::assertSame(0, $ct->rowsAffected());
+
+        $this->ensureConnectionValid();
+    }
+
+    public function testCopyFromNoticeReceivedMidStream(): void
+    {
+        if ($this->conn->getParameterStatus('crdb_version') !== '') {
+            $this->markTestSkipped('Server does not fully support COPY FROM (https://www.cockroachlabs.com/docs/v20.2/copy-from.html)');
+        }
+
+        $sql = <<<SQL
+create temporary table sentences(
+    t text,
+    ts tsvector
+)
+SQL;
+
+        $this->conn->exec($sql)->readAll();
+
+        $sql = <<<SQL
+create function pg_temp.sentences_trigger() returns trigger as $$
+begin
+  new.ts := to_tsvector(new.t);
+    return new;
+end
+$$ language plpgsql;
+SQL;
+
+        $this->conn->exec($sql)->readAll();
+
+        $sql = <<<SQL
+create trigger sentences_update before insert on sentences for each row execute procedure pg_temp.sentences_trigger();
+SQL;
+
+        $this->conn->exec($sql)->readAll();
+
+        $genData = static function(): \Generator {
+            $longSting = \str_repeat('X', 10001);
+
+            for ($i = 0; $i < 1000; $i++) {
+                yield "{$longSting}\n";
+            }
+        };
+        $stream = new ReadableIterableStream($genData());
+
+        $ct = $this->conn->copyFrom('COPY sentences(t) FROM STDIN WITH (FORMAT csv)', $stream);
+        self::assertSame(1000, $ct->rowsAffected());
+
+        $this->ensureConnectionValid();
+    }
+
+    public function testCopyTo(): void
+    {
+        if ($this->conn->getParameterStatus('crdb_version') !== '') {
+            $this->markTestSkipped('Server does not support COPY TO');
+        }
+
+        $sql = <<<SQL
+create temporary table foo(
+		a int2,
+		b int4,
+		c int8,
+		d varchar,
+		e text,
+		f date,
+		g json,
+		h bytea
+	)
+SQL;
+
+        $this->conn->exec($sql)->readAll();
+
+        $sql = <<<SQL
+insert into foo values (0, 1, 2, 'abc', 'efg', '2000-01-01', '{"abc":"def","foo":"bar"}', 'oooo')
+SQL;
+
+        $inputBytes = '';
+
+        for ($i = 0; $i < 1000; $i++) {
+            $this->conn->exec($sql)->readAll();
+
+            $inputBytes .= "0\t1\t2\tabc\tefg\t2000-01-01\t{\"abc\":\"def\",\"foo\":\"bar\"}\t\\\\x6f6f6f6f\n";
+        }
+
+        $stream = new WritableIterableStream(0);
+
+        $recvStr = '';
+        async(static function () use ($stream, &$recvStr) {
+            foreach ($stream->getIterator() as $value) {
+                $recvStr .= $value;
+            }
+        });
+
+        $ct = $this->conn->copyTo('COPY foo TO STDOUT', $stream);
+        self::assertSame(1000, $ct->rowsAffected());
+
+        self::assertSame($inputBytes, $recvStr);
+
+        $this->ensureConnectionValid();
+    }
+
+    public function testCopyToQueryError(): void
+    {
+        if ($this->conn->getParameterStatus('crdb_version') !== '') {
+            $this->markTestSkipped('Server does not support COPY TO');
+        }
+
+        $stream = new WritableIterableStream(0);
+
+        $this->expectException(PgErrorException::class);
+        $this->expectExceptionMessage('ERROR: syntax error at or near "CROPY" (SQLSTATE 42601)');
+
+        try {
+            $this->conn->copyTo('CROPY foo TO STDOUT', $stream);
+        } finally {
+            $this->ensureConnectionValid();
+        }
+    }
+
+    public function testCopyToCancelled(): void
+    {
+        if ($this->conn->getParameterStatus('crdb_version') !== '') {
+            $this->markTestSkipped('Server does not support COPY TO');
+        }
+
+        $stream = new WritableIterableStream(0);
+
+        async(static function () use ($stream) {
+            foreach ($stream->getIterator() as $value) {
+            }
+        });
+
+        $this->expectException(PgErrorException::class);
+        $this->expectExceptionMessage('ERROR: canceling statement due to user request (SQLSTATE 57014)');
+
+        try {
+            $this->conn->copyTo(
+                'copy (select *, pg_sleep(0.01) from generate_series(1,1000)) to stdout',
+                $stream,
+                new TimeoutCancellation(0.01),
+            );
+        } finally {
+            $this->ensureConnectionValid();
+        }
+    }
+
+    public function testCopyToPreCancelled(): void
+    {
+        if ($this->conn->getParameterStatus('crdb_version') !== '') {
+            $this->markTestSkipped('Server does not support COPY TO');
+        }
+
+        $stream = new WritableIterableStream(0);
+
+        $this->expectException(CancelledException::class);
+
+        $cancellation = new TimeoutCancellation(0.01);
+        delay(0.1);
+
+        try {
+            $this->conn->copyTo(
+                'copy (select *, pg_sleep(0.01) from generate_series(1,1000)) to stdout',
+                $stream,
+                $cancellation,
+            );
+        } finally {
+            $this->ensureConnectionValid();
+        }
+    }
+
     public function testCancelRequest(): void
     {
         if ($this->conn->getParameterStatus('crdb_version') !== '') {
@@ -689,7 +1004,9 @@ SQL);
     {
         $this->expectNotToPerformAssertions();
 
-        $this->conn->exec('select n from generate_series(1,10) n');
+        $res = $this->conn->exec('select n from generate_series(1,10) n');
         $this->conn->close();
+
+        unset($res);
     }
 }

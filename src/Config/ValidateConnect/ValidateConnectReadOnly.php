@@ -14,8 +14,8 @@ class ValidateConnectReadOnly implements ValidateConnectFuncInterface
     {
         $results = $conn->exec('show hot_standby; show transaction_read_only;')->readAll();
 
-        $hotStandbyOpt = $results[0]->rows[0][0];
-        $transactionReadOnlyOpt = $results[1]->rows[0][0];
+        $hotStandbyOpt = $results[0]->getRows()[0][0];
+        $transactionReadOnlyOpt = $results[1]->getRows()[0][0];
 
         if ($hotStandbyOpt !== 'on' && $transactionReadOnlyOpt !== 'on') {
             throw new ValidateConnectException('Server transactions must be read-only and hot standby mode enabled');

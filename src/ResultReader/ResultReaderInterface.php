@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace PhpPg\PgConn\ResultReader;
 
-use PhpPg\PgProto3\Messages\CommandTag;
+use PhpPg\PgConn\CommandTag;
 use PhpPg\PgProto3\Messages\FieldDescription;
 
 /**

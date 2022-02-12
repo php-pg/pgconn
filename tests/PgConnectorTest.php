@@ -130,8 +130,8 @@ class PgConnectorTest extends TestCase
         $conn = $connector->connect($config, new TimeoutCancellation(2));
         $results = $conn->exec('show application_name; show search_path;')->readAll();
 
-        self::assertSame('pg_test', $results[0]->rows[0][0]);
-        self::assertSame('myschema', $results[1]->rows[0][0]);
+        self::assertSame('pg_test', $results[0]->getRows()[0][0]);
+        self::assertSame('myschema', $results[1]->getRows()[0][0]);
     }
 
     public function testConnectWithFallback(): void
@@ -227,6 +227,6 @@ class PgConnectorTest extends TestCase
         $conn = $connector->connect($config, new TimeoutCancellation(2));
 
         $results = $conn->exec('show search_path')->readAll();
-        self::assertSame('foobar', $results[0]->rows[0][0]);
+        self::assertSame('foobar', $results[0]->getRows()[0][0]);
     }
 }

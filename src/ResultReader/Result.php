@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace PhpPg\PgConn\ResultReader;
 
-use PhpPg\PgProto3\Messages\CommandTag;
+use PhpPg\PgConn\CommandTag;
 use PhpPg\PgProto3\Messages\FieldDescription;
 
 /**
@@ -18,9 +18,9 @@ class Result
      * @param CommandTag $commandTag
      */
     public function __construct(
-        public array $fieldDescriptions,
-        public array $rows,
-        public CommandTag $commandTag,
+        private array $fieldDescriptions,
+        private array $rows,
+        private CommandTag $commandTag,
     ) {
     }
 
