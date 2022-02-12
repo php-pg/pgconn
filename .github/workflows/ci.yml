@@ -12,7 +12,7 @@ jobs:
       matrix:
         php-version: [8.1]
 #        pg-version: [9.6, 10, 11, 12, 13, cockroachdb]
-        pg-version: [12]
+        pg-version: [12, cockroachdb]
         include:
 #          - pg-version: 9.6
 #            pg-test-conn-string: postgres://php_pg_md5:secret@127.0.0.1/php_pg_test
@@ -42,7 +42,6 @@ jobs:
             pg-test-tls-conn-string: postgres://php_pg_md5:secret@127.0.0.1/php_pg_test?sslmode=require
             pg-test-md5-password-conn-string: postgres://php_pg_md5:secret@127.0.0.1/php_pg_test
             pg-test-plain-password-conn-string: postgres://php_pg_pw:secret@127.0.0.1/php_pg_test
-#            phpunit-flags: "--filter \"PgConnectorTest::*\""
 #          - pg-version: 13
 #            pg-test-conn-string: postgres://php_pg_md5:secret@127.0.0.1/php_pg_test
 #            pg-test-unix-socket-conn-string: "host=/var/run/postgresql dbname=php_pg_test"
@@ -50,8 +49,8 @@ jobs:
 #            pg-test-tls-conn-string: postgres://php_pg_md5:secret@127.0.0.1/php_pg_test?sslmode=require
 #            pg-test-md5-password-conn-string: postgres://php_pg_md5:secret@127.0.0.1/php_pg_test
 #            pg-test-plain-password-conn-string: postgres://php_pg_pw:secret@127.0.0.1/php_pg_test
-#          - pg-version: cockroachdb
-#            pg-test-conn-string: "postgresql://root@127.0.0.1:26257/php_pg_test?sslmode=disable&experimental_enable_temp_tables=on"
+          - pg-version: cockroachdb
+            pg-test-conn-string: "postgresql://root@127.0.0.1:26257/php_pg_test?sslmode=disable&experimental_enable_temp_tables=on"
 
     steps:
       - name: Set git to use LF
