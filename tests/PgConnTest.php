@@ -43,7 +43,7 @@ class PgConnTest extends TestCase
         $logger->pushHandler($handler);
 
         $config = parseConfig($connString);
-//        $config = $config->withLogger($logger);
+        $config = $config->withLogger($logger);
         $this->conn = (new PgConnector())->connect($config);
     }
 
